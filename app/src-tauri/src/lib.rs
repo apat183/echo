@@ -5,6 +5,7 @@ mod tracker;
 
 use db::{DayTotal, DayView, Project, ProjectApp, DbState};
 use std::sync::{Arc, Mutex};
+use tracker::TrackerState;
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, State};
 
@@ -129,7 +130,10 @@ pub fn run() {
             let shared: DbState = Arc::new(Mutex::new(conn));
             app.manage(shared.clone());
 
-            poller::spawn(shared);
+            let track = Arc::new(TrackerState::default());
+            app.manage(track.clone());
+
+            poller::spawn(shared, track);
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("default icon").clone())
