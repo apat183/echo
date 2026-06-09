@@ -237,13 +237,13 @@ fn app_key(bundle: &Option<String>, name: &Option<String>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn local_date_string(ts: i64) -> String {
+pub(crate) fn local_date_string(ts: i64) -> String {
     let dt = Local.timestamp_opt(ts, 0).single().expect("valid ts");
     format!("{:04}-{:02}-{:02}", dt.year(), dt.month(), dt.day())
 }
 
 /// Local midnight (unix seconds) for a 'YYYY-MM-DD' date string.
-fn day_start_ts(date: &str) -> i64 {
+pub(crate) fn day_start_ts(date: &str) -> i64 {
     let nd = NaiveDate::parse_from_str(date, "%Y-%m-%d").expect("valid date");
     let naive = nd.and_hms_opt(0, 0, 0).unwrap();
     Local
@@ -557,6 +557,19 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
     Ok(out)
 }
 
+/// Total tracked seconds for one local day (segments attributed by start_ts,
+/// same convention as day_view).
+pub fn day_total_seconds(conn: &Connection, date: &str) -> rusqlite::Result<i64> {
+    let start = day_start_ts(date);
+    let end = start + 86_400;
+    conn.query_row(
+        "SELECT COALESCE(SUM(end_ts - start_ts), 0) FROM segments
+         WHERE start_ts >= ?1 AND start_ts < ?2",
+        rusqlite::params![start, end],
+        |r| r.get(0),
+    )
+}
+
 /// Add, edit, or (with an empty note) clear the note on a project entry.
 /// `title = ""` is the app-level note.
 pub fn set_note(
@@ -580,4 +593,26 @@ pub fn set_note(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn day_total_sums_only_segments_starting_that_day() {
+        let conn = open(Path::new(":memory:")).unwrap();
+        let start = day_start_ts("2026-01-15");
+
+        // inside the day: 60s + 30s
+        insert_segment(&conn, start + 100, start + 160, None, Some("A"), None).unwrap();
+        insert_segment(&conn, start + 200, start + 230, None, Some("B"), None).unwrap();
+        // previous day and next day: excluded
+        insert_segment(&conn, start - 50, start - 10, None, Some("A"), None).unwrap();
+        insert_segment(&conn, start + 86_400 + 5, start + 86_400 + 25, None, Some("A"), None).unwrap();
+
+        assert_eq!(day_total_seconds(&conn, "2026-01-15").unwrap(), 90);
+        assert_eq!(day_total_seconds(&conn, "2026-01-14").unwrap(), 40);
+    }
 }
