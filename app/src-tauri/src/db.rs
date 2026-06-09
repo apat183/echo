@@ -376,6 +376,19 @@ pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
     })
 }
 
+/// Total tracked seconds for one local day (segments attributed by start_ts,
+/// same convention as day_view).
+pub fn day_total_seconds(conn: &Connection, date: &str) -> rusqlite::Result<i64> {
+    let start = day_start_ts(date);
+    let end = start + 86_400;
+    conn.query_row(
+        "SELECT COALESCE(SUM(end_ts - start_ts), 0) FROM segments
+         WHERE start_ts >= ?1 AND start_ts < ?2",
+        rusqlite::params![start, end],
+        |r| r.get(0),
+    )
+}
+
 /// Per-day totals for everything that resolves to `project_id` (newest day first).
 /// Resolution per segment: its own (app, title) link, else the app-level (app, "") link.
 pub fn project_breakdown(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<DayTotal>> {
@@ -555,19 +568,6 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
         .collect();
     out.sort_by(|a, b| b.seconds.cmp(&a.seconds));
     Ok(out)
-}
-
-/// Total tracked seconds for one local day (segments attributed by start_ts,
-/// same convention as day_view).
-pub fn day_total_seconds(conn: &Connection, date: &str) -> rusqlite::Result<i64> {
-    let start = day_start_ts(date);
-    let end = start + 86_400;
-    conn.query_row(
-        "SELECT COALESCE(SUM(end_ts - start_ts), 0) FROM segments
-         WHERE start_ts >= ?1 AND start_ts < ?2",
-        rusqlite::params![start, end],
-        |r| r.get(0),
-    )
 }
 
 /// Add, edit, or (with an empty note) clear the note on a project entry.
