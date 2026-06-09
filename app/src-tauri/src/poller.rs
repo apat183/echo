@@ -5,6 +5,7 @@
 //! is segments, not point-samples. Window titles are out of scope here
 //! (app-level only); Accessibility comes later.
 
+use crate::tracker::FrontApp;
 use crate::{ax, db};
 use chrono::Utc;
 use rusqlite::Connection;
@@ -17,13 +18,6 @@ const POLL_SECS: u64 = 2;
 /// (sleep / lid-close) — the polling thread is frozen during system sleep.
 /// We close the open segment at the last good tick and don't bill the gap.
 const SLEEP_GAP_SECS: i64 = 60;
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct FrontApp {
-    pub bundle: Option<String>,
-    pub name: Option<String>,
-    pub title: Option<String>,
-}
 
 #[cfg(target_os = "macos")]
 fn read_frontmost() -> Option<FrontApp> {

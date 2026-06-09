@@ -13,6 +13,10 @@ use rusqlite::Connection;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+/// Shared handle to our SQLite connection (poller thread + commands + tray).
+pub type DbState = Arc<Mutex<Connection>>;
 
 #[derive(Debug, Serialize)]
 pub struct Project {

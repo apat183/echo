@@ -1,15 +1,12 @@
 mod ax;
 mod db;
 mod poller;
+mod tracker;
 
-use db::{DayTotal, DayView, Project, ProjectApp};
-use rusqlite::Connection;
+use db::{DayTotal, DayView, Project, ProjectApp, DbState};
 use std::sync::{Arc, Mutex};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, State};
-
-/// Shared handle to our SQLite connection (poller thread + commands).
-type DbState = Arc<Mutex<Connection>>;
 
 #[tauri::command]
 fn get_day_view(state: State<'_, DbState>, date: String) -> Result<DayView, String> {
