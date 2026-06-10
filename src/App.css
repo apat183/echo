@@ -599,10 +599,6 @@ body {
   .app-timeline {
     flex-basis: 112px;
   }
-
-  .app-project-tag {
-    max-width: 96px;
-  }
 }
 
 /* ---- app group: disclosure, title count, title sub-rows ---- */
