@@ -14,7 +14,7 @@ export type PeriodTitleUsage = {
   projects: RowProject[]; // explicit title-level links across the period
 };
 
-export type PeriodAppUsage = Omit<AppUsage, "project_id" | "titles"> & {
+export type PeriodAppUsage = Omit<AppUsage, "project_ids" | "titles"> & {
   dates: string[];
   projects: RowProject[]; // app-level (title="") links across the period
   titles: PeriodTitleUsage[];
@@ -69,7 +69,7 @@ export function mergeDayViews(
       entry.seconds += app.seconds;
       addHours(entry.hours, app.hours);
       entry.dates.push(day.date);
-      if (app.project_id != null) pushDate(entry.datesByProject, app.project_id, day.date);
+      for (const pid of app.project_ids) pushDate(entry.datesByProject, pid, day.date);
 
       for (const t of app.titles) {
         const tacc =
@@ -77,7 +77,7 @@ export function mergeDayViews(
           { seconds: 0, dates: [], datesByProject: new Map<number, string[]>() };
         tacc.seconds += t.seconds;
         tacc.dates.push(day.date);
-        if (t.project_id != null) pushDate(tacc.datesByProject, t.project_id, day.date);
+        for (const pid of t.project_ids) pushDate(tacc.datesByProject, pid, day.date);
         entry.titles.set(t.title, tacc);
       }
 
@@ -123,4 +123,33 @@ function rowProjects(map: Map<number, string[]>): RowProject[] {
   return [...map.entries()]
     .map(([id, dates]) => ({ id, dates: [...new Set(dates)].sort() }))
     .sort((a, b) => a.id - b.id);
+}
+
+/**
+ * Splits a list of PeriodTitleUsage rows into major (visible) and tiny
+ * (sub-threshold) groups. The "" untitled row always stays in major.
+ * Grouping only happens when there are at least 2 tiny rows; a single
+ * tiny row is not worth collapsing. Input order is preserved in both outputs.
+ */
+export function partitionTitles(
+  titles: PeriodTitleUsage[],
+  thresholdSeconds = 60,
+): { major: PeriodTitleUsage[]; tiny: PeriodTitleUsage[] } {
+  const major: PeriodTitleUsage[] = [];
+  const tiny: PeriodTitleUsage[] = [];
+
+  for (const t of titles) {
+    if (t.title.trim() === "" || t.seconds >= thresholdSeconds) {
+      major.push(t);
+    } else {
+      tiny.push(t);
+    }
+  }
+
+  // Only group when there are at least 2 tiny rows; otherwise keep input order
+  if (tiny.length < 2) {
+    return { major: titles.filter((t) => major.includes(t) || tiny.includes(t)), tiny: [] };
+  }
+
+  return { major, tiny };
 }

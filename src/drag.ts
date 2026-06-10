@@ -33,3 +33,48 @@ export function parseDragPayload(dataTransfer: DataTransfer): DragPayload | null
   }
   return null;
 }
+
+// ---- Project reorder drag helpers -----------------------------------------
+
+export const PROJECT_DRAG_MIME = "application/x-echo-project";
+
+/** Starts a project reorder drag; encodes the project id onto the transfer. */
+export function startProjectDrag(e: ReactDragEvent, projectId: number): void {
+  e.dataTransfer.setData(PROJECT_DRAG_MIME, String(projectId));
+  e.dataTransfer.effectAllowed = "move";
+}
+
+/**
+ * Returns true when the drag transfer carries a project drag payload.
+ * Use this in dragover handlers where getData() is unavailable in WKWebView.
+ */
+export function isProjectDrag(types: readonly string[]): boolean {
+  return types.includes(PROJECT_DRAG_MIME);
+}
+
+/**
+ * Parses the project id from a drop's DataTransfer.
+ * Returns null when the mime type is absent or the value is not a valid integer.
+ */
+export function parseProjectDragId(dt: DataTransfer): number | null {
+  const raw = dt.getData(PROJECT_DRAG_MIME);
+  if (!raw) return null;
+  const id = parseInt(raw, 10);
+  return isNaN(id) ? null : id;
+}
+
+/**
+ * Pure reorder: removes draggedId from ids, then inserts it directly after
+ * targetId. Returns ids unchanged (same reference) if either id is absent or
+ * both ids are the same.
+ */
+export function reorderIds(ids: number[], draggedId: number, targetId: number): number[] {
+  if (draggedId === targetId) return ids;
+  const fromIdx = ids.indexOf(draggedId);
+  if (fromIdx === -1 || ids.indexOf(targetId) === -1) return ids;
+  const result = [...ids];
+  result.splice(fromIdx, 1);
+  const newTargetIdx = result.indexOf(targetId);
+  result.splice(newTargetIdx + 1, 0, draggedId);
+  return result;
+}

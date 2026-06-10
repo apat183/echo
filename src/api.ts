@@ -5,7 +5,7 @@ export type Project = { id: number; name: string; color: string };
 export type TitleUsage = {
   title: string; // "" = untitled
   seconds: number;
-  project_id: number | null; // explicit (app,title) link; null = inherits app-level
+  project_ids: number[]; // explicit (app,title) links; empty = inherits app-level
 };
 
 export type AppUsage = {
@@ -14,7 +14,7 @@ export type AppUsage = {
   bundle_id: string | null;
   seconds: number;
   hours: number[]; // length 24
-  project_id: number | null; // app-level (title="") link
+  project_ids: number[]; // app-level (title="") links; empty = unassigned
   titles: TitleUsage[];
 };
 
@@ -48,12 +48,15 @@ export const api = {
   createProject: (name: string, color: string) =>
     invoke<Project>("create_project", { name, color }),
   deleteProject: (id: number) => invoke<void>("delete_project", { id }),
-  setAssignment: (date: string, appKey: string, title: string, projectId: number | null) =>
-    invoke<void>("set_assignment", { date, appKey, title, projectId }),
+  addAssignment: (date: string, appKey: string, title: string, projectId: number) =>
+    invoke<void>("add_assignment", { date, appKey, title, projectId }),
+  removeAssignment: (date: string, appKey: string, title: string, projectId: number) =>
+    invoke<void>("remove_assignment", { date, appKey, title, projectId }),
   projectBreakdown: (projectId: number) =>
     invoke<DayTotal[]>("project_breakdown", { projectId }),
   projectApps: (projectId: number) =>
     invoke<ProjectApp[]>("project_apps", { projectId }),
+  setProjectOrder: (ids: number[]) => invoke<void>("set_project_order", { ids }),
   setNote: (projectId: number, appKey: string, title: string, note: string) =>
     invoke<void>("set_note", { projectId, appKey, title, note }),
   appIcon: (bundleId: string | null) =>
