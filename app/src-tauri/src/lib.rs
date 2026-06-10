@@ -121,6 +121,17 @@ fn platform_app_icon_data_url(_bundle_id: &str) -> Option<String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            // Red close button = hide to the menu bar, keep tracking (spec §2).
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+                #[cfg(target_os = "macos")]
+                let _ = window
+                    .app_handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+        })
         .setup(|app| {
             let dir = app.path().app_data_dir().expect("app data dir");
             std::fs::create_dir_all(&dir).ok();
@@ -152,6 +163,15 @@ pub fn run() {
             ax_status,
             ax_request,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Single flush point for every exit path (tray Quit, Cmd-Q, …):
+            // the in-progress segment must never be lost (spec §4).
+            if let tauri::RunEvent::Exit = event {
+                let track = app_handle.state::<Arc<TrackerState>>();
+                let db = app_handle.state::<DbState>();
+                track.close_current(&db, chrono::Utc::now().timestamp());
+            }
+        });
 }

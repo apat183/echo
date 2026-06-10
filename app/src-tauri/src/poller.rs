@@ -48,9 +48,11 @@ pub fn process_tick(
     now: i64,
     last_tick: i64,
 ) {
-    let Ok(mut current) = tracker.current.lock() else {
-        return;
-    };
+    // Recover a poisoned lock: one panic must not permanently stop tracking.
+    let mut current = tracker
+        .current
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     // Suspend gap (sleep / lid-close): close at the last good tick so the
     // asleep stretch is never billed.
@@ -173,6 +175,21 @@ mod tests {
 
         process_tick(&t, &db, None, 112, 110);
         assert_eq!(segments(&db).len(), 1);
+        assert!(t.current.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn paused_tick_with_live_front_app_records_nothing() {
+        let db = mem_db();
+        let t = TrackerState::default();
+
+        process_tick(&t, &db, Some(front("A")), 100, 98);
+        t.paused.store(true, Ordering::SeqCst);
+
+        // A tick that raced past the paused check in spawn() and still read a
+        // frontmost app must not record or reopen anything.
+        process_tick(&t, &db, Some(front("B")), 110, 108);
+        assert_eq!(segments(&db), vec![(100, 110, Some("A".to_string()))]);
         assert!(t.current.lock().unwrap().is_none());
     }
 

@@ -43,10 +43,13 @@ pub fn close_open_segment(slot: &mut Option<OpenSegment>, db: &DbState, end_ts: 
 
 impl TrackerState {
     /// Lock `current` and close-and-write it. Used by pause and quit.
+    /// A poisoned lock is recovered — the flush must survive a prior panic.
     pub fn close_current(&self, db: &DbState, end_ts: i64) {
-        if let Ok(mut slot) = self.current.lock() {
-            close_open_segment(&mut slot, db, end_ts);
-        }
+        let mut slot = self
+            .current
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        close_open_segment(&mut slot, db, end_ts);
     }
 }
 
