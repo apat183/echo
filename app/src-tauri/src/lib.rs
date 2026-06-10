@@ -150,7 +150,7 @@ pub fn run() {
 
             tray::init(app)?;
 
-            poller::spawn(shared, track);
+            poller::spawn(app.handle().clone(), shared, track);
 
             Ok(())
         })

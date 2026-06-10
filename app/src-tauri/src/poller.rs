@@ -5,13 +5,14 @@
 //! the frontmost app+title changes — segments, not point-samples.
 
 use crate::tracker::{self, FrontApp, OpenSegment, TrackerState};
-use crate::{ax, db};
+use crate::{ax, db, tray};
 use chrono::Utc;
 use db::DbState;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use tauri::AppHandle;
 
 const POLL_SECS: u64 = 2;
 /// If two ticks are more than this far apart, the machine was suspended
@@ -80,20 +81,32 @@ pub fn process_tick(
 }
 
 /// Spawn the polling thread. Runs for the lifetime of the process.
-pub fn spawn(db: DbState, tracker: Arc<TrackerState>) {
+pub fn spawn(app: AppHandle, db: DbState, tracker: Arc<TrackerState>) {
     thread::spawn(move || {
         let mut last_tick = Utc::now().timestamp();
         loop {
             thread::sleep(Duration::from_secs(POLL_SECS));
             let now = Utc::now().timestamp();
+            let paused = tracker.paused.load(Ordering::SeqCst);
             // Skip the AX/NSWorkspace work entirely while paused.
-            let front = if tracker.paused.load(Ordering::SeqCst) {
-                None
-            } else {
-                read_frontmost()
-            };
+            let front = if paused { None } else { read_frontmost() };
             process_tick(&tracker, &db, front, now, last_tick);
             last_tick = now;
+
+            // Push the Today readout to the tray (closed segments + the open
+            // segment's elapsed time; an open segment spanning midnight is
+            // counted fully into today — a ~once-a-day rounding we accept).
+            let date = db::local_date_string(now);
+            let mut total = match db.lock() {
+                Ok(conn) => db::day_total_seconds(&conn, &date).unwrap_or(0),
+                Err(_) => 0,
+            };
+            if let Ok(cur) = tracker.current.lock() {
+                if let Some(seg) = &*cur {
+                    total += (now - seg.start_ts).max(0);
+                }
+            }
+            tray::refresh_today(&app, total, paused);
         }
     });
 }
