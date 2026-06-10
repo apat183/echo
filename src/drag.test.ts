@@ -83,7 +83,11 @@ describe("reorderIds", () => {
   });
 
   it("moves an id backward in the list", () => {
-    expect(reorderIds([1, 2, 3, 4], 3, 1)).toEqual([1, 3, 2, 4]);
+    expect(reorderIds([1, 2, 3, 4], 3, 1)).toEqual([3, 1, 2, 4]);
+  });
+
+  it("moves an id upward (another case)", () => {
+    expect(reorderIds([1, 2, 3, 4], 4, 2)).toEqual([1, 4, 2, 3]);
   });
 
   it("returns the original array unchanged when draggedId is absent", () => {

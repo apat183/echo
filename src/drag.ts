@@ -64,17 +64,17 @@ export function parseProjectDragId(dt: DataTransfer): number | null {
 }
 
 /**
- * Pure reorder: removes draggedId from ids, then inserts it directly after
- * targetId. Returns ids unchanged (same reference) if either id is absent or
- * both ids are the same.
+ * Pure reorder: removes draggedId from ids, then inserts it at the index
+ * targetId had in the original array (take-the-slot semantics). When moving
+ * upward the dragged id lands before the target; when moving downward it lands
+ * after the target. Returns ids unchanged (same reference) if either id is
+ * absent or both ids are the same.
  */
 export function reorderIds(ids: number[], draggedId: number, targetId: number): number[] {
-  if (draggedId === targetId) return ids;
-  const fromIdx = ids.indexOf(draggedId);
-  if (fromIdx === -1 || ids.indexOf(targetId) === -1) return ids;
-  const result = [...ids];
-  result.splice(fromIdx, 1);
-  const newTargetIdx = result.indexOf(targetId);
-  result.splice(newTargetIdx + 1, 0, draggedId);
-  return result;
+  const di = ids.indexOf(draggedId);
+  const ti = ids.indexOf(targetId);
+  if (di < 0 || ti < 0 || di === ti) return ids;
+  const out = ids.filter(id => id !== draggedId);
+  out.splice(ti, 0, draggedId);
+  return out;
 }
