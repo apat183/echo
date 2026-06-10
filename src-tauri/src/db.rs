@@ -102,7 +102,8 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             id         INTEGER PRIMARY KEY,
             name       TEXT NOT NULL,
             color      TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS day_assignments (
@@ -124,6 +125,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     )?;
     migrate_assignments_title(&conn)?;
     migrate_assignments_multi(&conn)?;
+    migrate_projects_sort_order(&conn)?;
     Ok(conn)
 }
 
@@ -196,6 +198,33 @@ fn migrate_assignments_multi(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Older DBs have no `sort_order` column on projects. Add it and backfill
+/// 0..N-1 in `created_at` order (with `id` as the tiebreaker for equal
+/// timestamps) so the existing project list order is preserved.
+fn migrate_projects_sort_order(conn: &Connection) -> rusqlite::Result<()> {
+    let mut has_sort_order = false;
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(projects)")?;
+        let cols = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for c in cols {
+            if c? == "sort_order" {
+                has_sort_order = true;
+            }
+        }
+    }
+    if !has_sort_order {
+        conn.execute_batch(
+            "ALTER TABLE projects ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+             UPDATE projects SET sort_order = (
+               SELECT COUNT(*) FROM projects p2
+               WHERE p2.created_at < projects.created_at
+                  OR (p2.created_at = projects.created_at AND p2.id < projects.id)
+             );",
+        )?;
+    }
+    Ok(())
+}
+
 pub fn insert_segment(
     conn: &Connection,
     start_ts: i64,
@@ -216,7 +245,7 @@ pub fn insert_segment(
 
 pub fn list_projects(conn: &Connection) -> rusqlite::Result<Vec<Project>> {
     let mut stmt =
-        conn.prepare("SELECT id, name, color FROM projects ORDER BY created_at ASC")?;
+        conn.prepare("SELECT id, name, color FROM projects ORDER BY sort_order ASC, id ASC")?;
     let rows = stmt.query_map([], |r| {
         Ok(Project {
             id: r.get(0)?,
@@ -230,7 +259,8 @@ pub fn list_projects(conn: &Connection) -> rusqlite::Result<Vec<Project>> {
 pub fn create_project(conn: &Connection, name: &str, color: &str) -> rusqlite::Result<Project> {
     let now = Local::now().timestamp();
     conn.execute(
-        "INSERT INTO projects (name, color, created_at) VALUES (?1, ?2, ?3)",
+        "INSERT INTO projects (name, color, created_at, sort_order)
+         VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects))",
         rusqlite::params![name, color, now],
     )?;
     Ok(Project {
@@ -243,6 +273,18 @@ pub fn create_project(conn: &Connection, name: &str, color: &str) -> rusqlite::R
 pub fn delete_project(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM projects WHERE id = ?1", [id])?;
     conn.execute("DELETE FROM day_assignments WHERE project_id = ?1", [id])?;
+    Ok(())
+}
+
+/// Persist a new display order for projects. `ids` is the complete ordered list
+/// of project ids; each project's `sort_order` is set to its index in the slice.
+pub fn set_project_order(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
+    for (i, &id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE projects SET sort_order = ?1 WHERE id = ?2",
+            rusqlite::params![i as i64, id],
+        )?;
+    }
     Ok(())
 }
 
@@ -1128,5 +1170,97 @@ mod tests {
         add_assignment(&conn, "2026-01-05", "com.x", "", 99).unwrap();
         let a = Assignments::load(&conn).unwrap();
         assert_eq!(a.links("2026-01-05", "com.x", ""), [10, 99]);
+    }
+
+    // ---- project ordering -------------------------------------------------
+
+    #[test]
+    fn list_projects_returns_creation_order() {
+        let conn = mem();
+        let a = create_project(&conn, "A", "#aaa").unwrap();
+        let b = create_project(&conn, "B", "#bbb").unwrap();
+        let c = create_project(&conn, "C", "#ccc").unwrap();
+        let projects = list_projects(&conn).unwrap();
+        assert_eq!(projects.len(), 3);
+        assert_eq!(projects[0].id, a.id);
+        assert_eq!(projects[1].id, b.id);
+        assert_eq!(projects[2].id, c.id);
+    }
+
+    #[test]
+    fn set_project_order_reorders_projects() {
+        let conn = mem();
+        let a = create_project(&conn, "A", "#aaa").unwrap();
+        let b = create_project(&conn, "B", "#bbb").unwrap();
+        let c = create_project(&conn, "C", "#ccc").unwrap();
+
+        set_project_order(&conn, &[c.id, a.id, b.id]).unwrap();
+
+        let projects = list_projects(&conn).unwrap();
+        assert_eq!(projects[0].id, c.id);
+        assert_eq!(projects[1].id, a.id);
+        assert_eq!(projects[2].id, b.id);
+    }
+
+    #[test]
+    fn new_project_appends_after_reorder() {
+        let conn = mem();
+        let a = create_project(&conn, "A", "#aaa").unwrap();
+        let b = create_project(&conn, "B", "#bbb").unwrap();
+        let c = create_project(&conn, "C", "#ccc").unwrap();
+
+        // Reorder to C, A, B.
+        set_project_order(&conn, &[c.id, a.id, b.id]).unwrap();
+
+        // Newly created project should appear at the end.
+        let d = create_project(&conn, "D", "#ddd").unwrap();
+        let projects = list_projects(&conn).unwrap();
+        assert_eq!(projects.len(), 4);
+        assert_eq!(projects[0].id, c.id);
+        assert_eq!(projects[1].id, a.id);
+        assert_eq!(projects[2].id, b.id);
+        assert_eq!(projects[3].id, d.id);
+    }
+
+    #[test]
+    fn migrate_projects_sort_order_backfills_and_is_idempotent() {
+        // Build an OLD-schema projects table without sort_order.
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE projects (
+                id         INTEGER PRIMARY KEY,
+                name       TEXT NOT NULL,
+                color      TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+             );
+             -- Two rows with distinct created_at.
+             INSERT INTO projects (id, name, color, created_at) VALUES (1, 'First',  '#111', 1000);
+             INSERT INTO projects (id, name, color, created_at) VALUES (2, 'Second', '#222', 2000);
+             INSERT INTO projects (id, name, color, created_at) VALUES (3, 'Third',  '#333', 3000);
+             -- Two rows with equal created_at (id tiebreaker: 4 < 5).
+             INSERT INTO projects (id, name, color, created_at) VALUES (4, 'TieA',   '#444', 4000);
+             INSERT INTO projects (id, name, color, created_at) VALUES (5, 'TieB',   '#555', 4000);",
+        )
+        .unwrap();
+
+        migrate_projects_sort_order(&conn).unwrap();
+
+        // Now list_projects should work and respect the backfilled order.
+        let projects = list_projects(&conn).unwrap();
+        assert_eq!(projects.len(), 5);
+        assert_eq!(projects[0].name, "First");
+        assert_eq!(projects[1].name, "Second");
+        assert_eq!(projects[2].name, "Third");
+        // TieA (id=4) < TieB (id=5), so TieA is index 3, TieB is index 4.
+        assert_eq!(projects[3].name, "TieA");
+        assert_eq!(projects[4].name, "TieB");
+
+        // Running the migration again is a no-op — order is unchanged.
+        migrate_projects_sort_order(&conn).unwrap();
+        let projects2 = list_projects(&conn).unwrap();
+        assert_eq!(
+            projects.iter().map(|p| p.id).collect::<Vec<_>>(),
+            projects2.iter().map(|p| p.id).collect::<Vec<_>>()
+        );
     }
 }

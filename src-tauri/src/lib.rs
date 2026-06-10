@@ -38,6 +38,12 @@ fn delete_project(state: State<'_, DbState>, id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_project_order(state: State<'_, DbState>, ids: Vec<i64>) -> Result<(), String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::set_project_order(&conn, &ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn add_assignment(
     state: State<'_, DbState>,
     date: String,
@@ -171,6 +177,7 @@ pub fn run() {
             list_projects,
             create_project,
             delete_project,
+            set_project_order,
             add_assignment,
             remove_assignment,
             project_breakdown,
