@@ -544,7 +544,7 @@ pub fn day_total_seconds(conn: &Connection, date: &str) -> rusqlite::Result<i64>
 }
 
 /// Per-day totals for everything that resolves to `project_id` (newest day first).
-/// Resolution per segment: its own (app, title) link, else the app-level (app, "") link.
+/// Resolution per segment: its own (app, title) tags, else the app-level (app, "") tags.
 pub fn project_breakdown(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<DayTotal>> {
     let assigns = Assignments::load(conn)?;
     if assigns.is_empty() {
@@ -1088,5 +1088,45 @@ mod tests {
         migrate_assignments_multi(&conn).unwrap();
         let a = Assignments::load(&conn).unwrap();
         assert_eq!(a.links("2026-03-10", "com.a", "x"), [1, 9]);
+    }
+
+    #[test]
+    fn migrate_ancient_schema_title_then_multi_converges() {
+        // Simulate the ANCIENT schema: no title column, PK is (date, app_key).
+        // This is the shape that existed before migrate_assignments_title was added.
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE day_assignments (
+                date       TEXT NOT NULL,
+                app_key    TEXT NOT NULL,
+                project_id INTEGER NOT NULL,
+                PRIMARY KEY (date, app_key)
+             );
+             INSERT INTO day_assignments (date, app_key, project_id)
+                VALUES ('2026-01-05', 'com.x', 10),
+                       ('2026-01-05', 'com.y', 20);",
+        )
+        .unwrap();
+
+        // Run migrations in the same order as open().
+        migrate_assignments_title(&conn).unwrap();
+        migrate_assignments_multi(&conn).unwrap();
+
+        // Both rows survived with title backfilled to ''.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM day_assignments", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+        let a = Assignments::load(&conn).unwrap();
+        assert_eq!(a.links("2026-01-05", "com.x", ""), [10]);
+        assert_eq!(a.links("2026-01-05", "com.y", ""), [20]);
+
+        // The final schema has project_id in the PK, so two projects on the
+        // same (date, app_key, title) are insertable (migrate_assignments_multi
+        // was effectively a no-op because migrate_assignments_title already
+        // wrote the 4-column PK form).
+        add_assignment(&conn, "2026-01-05", "com.x", "", 99).unwrap();
+        let a = Assignments::load(&conn).unwrap();
+        assert_eq!(a.links("2026-01-05", "com.x", ""), [10, 99]);
     }
 }
