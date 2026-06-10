@@ -123,6 +123,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .on_window_event(|window, event| {
             // Red close button = hide to the menu bar, keep tracking (spec §2).
+            // Main window only: the Accessory switch is process-global.
+            if window.label() != "main" {
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
