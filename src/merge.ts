@@ -148,7 +148,7 @@ export function partitionTitles(
 
   // Only group when there are at least 2 tiny rows; otherwise keep input order
   if (tiny.length < 2) {
-    return { major: titles.filter((t) => major.includes(t) || tiny.includes(t)), tiny: [] };
+    return { major: [...titles], tiny: [] };
   }
 
   return { major, tiny };
