@@ -3,7 +3,9 @@
 //! Tables:
 //!   segments        immutable, append-only ground truth (one row per app focus stretch)
 //!   projects        user-created buckets
-//!   day_assignments per-(local-day, app) link to a project (drag = "just that day", #7)
+//!   day_assignments per-(local-day, app) tags linking time to projects, many-to-many
+//!                   (drag = "just that day", #7); one app/title can be tagged with
+//!                   several projects and each is billed the full duration
 //!
 //! All time aggregation attributes a segment to the LOCAL date of its start, so the
 //! daily view and project breakdown stay consistent.
@@ -25,13 +27,14 @@ pub struct Project {
     pub color: String,
 }
 
-/// One window-title's time within an app, with its explicit project link (if any).
-/// `project_id` is the title's OWN assignment — None means it inherits the app-level one.
+/// One window-title's time within an app, with its explicit project tags (if any).
+/// `project_ids` are the title's OWN assignments — empty means it inherits the
+/// app-level ones. Multiple ids = tagged with several projects.
 #[derive(Debug, Serialize)]
 pub struct TitleUsage {
     pub title: String, // "" = untitled / app has no window title
     pub seconds: i64,
-    pub project_id: Option<i64>,
+    pub project_ids: Vec<i64>,
 }
 
 /// One app's total time within a day, broken down by window title.
@@ -41,8 +44,8 @@ pub struct AppUsage {
     pub app_name: String, // display name
     pub bundle_id: Option<String>,
     pub seconds: i64,
-    pub hours: Vec<i64>,         // 24 buckets, seconds per hour of the local day
-    pub project_id: Option<i64>, // app-level (title = "") assignment
+    pub hours: Vec<i64>,        // 24 buckets, seconds per hour of the local day
+    pub project_ids: Vec<i64>,  // app-level (title = "") tags; empty = unassigned
     pub titles: Vec<TitleUsage>,
 }
 
@@ -107,7 +110,8 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             app_key       TEXT NOT NULL,   -- bundle id, else app name
             title         TEXT NOT NULL DEFAULT '',  -- '' = app-level (all titles)
             project_id    INTEGER NOT NULL,
-            PRIMARY KEY (date, app_key, title)
+            -- many-to-many tags: one (date, app_key, title) may link to several projects
+            PRIMARY KEY (date, app_key, title, project_id)
         );
 
         CREATE TABLE IF NOT EXISTS entry_notes (
@@ -119,6 +123,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         );",
     )?;
     migrate_assignments_title(&conn)?;
+    migrate_assignments_multi(&conn)?;
     Ok(conn)
 }
 
@@ -143,10 +148,48 @@ fn migrate_assignments_title(conn: &Connection) -> rusqlite::Result<()> {
                 app_key    TEXT NOT NULL,
                 title      TEXT NOT NULL DEFAULT '',
                 project_id INTEGER NOT NULL,
-                PRIMARY KEY (date, app_key, title)
+                PRIMARY KEY (date, app_key, title, project_id)
              );
              INSERT INTO day_assignments (date, app_key, title, project_id)
                 SELECT date, app_key, '', project_id FROM day_assignments_old;
+             DROP TABLE day_assignments_old;",
+        )?;
+    }
+    Ok(())
+}
+
+/// Older DBs keyed day_assignments by (date, app_key, title) — one project per
+/// entry. Tag semantics need many-to-many, so project_id joins the primary key.
+/// The column list is identical pre/post, so we detect the old schema by the
+/// `pk` flag of the project_id column (index 5 of PRAGMA table_info): it is 0
+/// when project_id isn't part of the PK (old) and 4 in the new 4-column PK.
+/// On detection we rebuild, carrying every existing row across unchanged.
+fn migrate_assignments_multi(conn: &Connection) -> rusqlite::Result<()> {
+    let mut project_id_in_pk = false;
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(day_assignments)")?;
+        let cols = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)?))
+        })?;
+        for c in cols {
+            let (name, pk) = c?;
+            if name == "project_id" && pk != 0 {
+                project_id_in_pk = true;
+            }
+        }
+    }
+    if !project_id_in_pk {
+        conn.execute_batch(
+            "ALTER TABLE day_assignments RENAME TO day_assignments_old;
+             CREATE TABLE day_assignments (
+                date       TEXT NOT NULL,
+                app_key    TEXT NOT NULL,
+                title      TEXT NOT NULL DEFAULT '',
+                project_id INTEGER NOT NULL,
+                PRIMARY KEY (date, app_key, title, project_id)
+             );
+             INSERT INTO day_assignments (date, app_key, title, project_id)
+                SELECT date, app_key, title, project_id FROM day_assignments_old;
              DROP TABLE day_assignments_old;",
         )?;
     }
@@ -205,26 +248,39 @@ pub fn delete_project(conn: &Connection, id: i64) -> rusqlite::Result<()> {
 
 // ---- assignments ----------------------------------------------------------
 
-/// Link (or, with `project_id = None`, unlink) a day's app/title-time to a project.
-/// `title = ""` is the app-level link covering every title not assigned on its own.
-pub fn set_assignment(
+/// Tag a day's app/title-time with a project. Tags are additive: an entry may
+/// carry several projects, each billed the full duration. Idempotent — adding the
+/// same tag twice is a no-op. `title = ""` is the app-level tag covering every
+/// title not tagged on its own.
+pub fn add_assignment(
     conn: &Connection,
     date: &str,
     app_key: &str,
     title: &str,
-    project_id: Option<i64>,
+    project_id: i64,
 ) -> rusqlite::Result<()> {
-    match project_id {
-        Some(pid) => conn.execute(
-            "INSERT INTO day_assignments (date, app_key, title, project_id) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(date, app_key, title) DO UPDATE SET project_id = excluded.project_id",
-            rusqlite::params![date, app_key, title, pid],
-        )?,
-        None => conn.execute(
-            "DELETE FROM day_assignments WHERE date = ?1 AND app_key = ?2 AND title = ?3",
-            rusqlite::params![date, app_key, title],
-        )?,
-    };
+    conn.execute(
+        "INSERT INTO day_assignments (date, app_key, title, project_id) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(date, app_key, title, project_id) DO NOTHING",
+        rusqlite::params![date, app_key, title, project_id],
+    )?;
+    Ok(())
+}
+
+/// Remove one project tag from a day's app/title-time, leaving any other tags
+/// on the same entry intact. `title = ""` is the app-level tag.
+pub fn remove_assignment(
+    conn: &Connection,
+    date: &str,
+    app_key: &str,
+    title: &str,
+    project_id: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM day_assignments
+         WHERE date = ?1 AND app_key = ?2 AND title = ?3 AND project_id = ?4",
+        rusqlite::params![date, app_key, title, project_id],
+    )?;
     Ok(())
 }
 
@@ -306,10 +362,11 @@ fn read_segments(conn: &Connection, range: Option<(i64, i64)>) -> rusqlite::Resu
 }
 
 /// Project assignments with the resolution rule in one place. Keyed
-/// (date, app_key, title); `title = ""` is the app-level link covering every
-/// title that has no link of its own.
+/// (date, app_key, title) → the projects tagged onto it; `title = ""` is the
+/// app-level entry covering every title that has no tag of its own. Each entry's
+/// project list is sorted ascending for deterministic output.
 struct Assignments {
-    by_key: HashMap<(String, String, String), i64>,
+    by_key: HashMap<(String, String, String), Vec<i64>>,
 }
 
 impl Assignments {
@@ -337,10 +394,14 @@ impl Assignments {
     where
         I: Iterator<Item = rusqlite::Result<(String, String, String, i64)>>,
     {
-        let mut by_key = HashMap::new();
+        let mut by_key: HashMap<(String, String, String), Vec<i64>> = HashMap::new();
         for row in rows {
             let (date, app_key, title, project_id) = row?;
-            by_key.insert((date, app_key, title), project_id);
+            by_key.entry((date, app_key, title)).or_default().push(project_id);
+        }
+        // Deterministic order regardless of row arrival order.
+        for ids in by_key.values_mut() {
+            ids.sort_unstable();
         }
         Ok(Self { by_key })
     }
@@ -349,19 +410,25 @@ impl Assignments {
         self.by_key.is_empty()
     }
 
-    /// The explicit link for exactly this (date, app_key, title) — no fallback.
-    /// The day view shows this per row so inheritance can be rendered.
-    fn link(&self, date: &str, app_key: &str, title: &str) -> Option<i64> {
+    /// The explicit tags for exactly this (date, app_key, title) — no fallback.
+    /// The day view shows these per row so inheritance can be rendered.
+    fn links(&self, date: &str, app_key: &str, title: &str) -> &[i64] {
         self.by_key
             .get(&(date.to_string(), app_key.to_string(), title.to_string()))
-            .copied()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
-    /// The project a segment is billed to: its own title link, else the
-    /// app-level (title = "") link.
-    fn resolve(&self, date: &str, app_key: &str, title: &str) -> Option<i64> {
-        self.link(date, app_key, title)
-            .or_else(|| self.link(date, app_key, ""))
+    /// The projects a segment is billed to: its own title tags if any, else the
+    /// app-level (title = "") tags. The title's tags OVERRIDE the app-level ones
+    /// (no union) — an explicitly-tagged title is not also billed app-level.
+    fn resolve(&self, date: &str, app_key: &str, title: &str) -> &[i64] {
+        let own = self.links(date, app_key, title);
+        if own.is_empty() {
+            self.links(date, app_key, "")
+        } else {
+            own
+        }
     }
 }
 
@@ -436,14 +503,14 @@ pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
                 .titles
                 .into_iter()
                 .map(|(title, seconds)| TitleUsage {
-                    project_id: assigns.link(date, &key, &title),
+                    project_ids: assigns.links(date, &key, &title).to_vec(),
                     title,
                     seconds,
                 })
                 .collect();
             titles.sort_by(|a, b| b.seconds.cmp(&a.seconds));
             AppUsage {
-                project_id: assigns.link(date, &key, ""),
+                project_ids: assigns.links(date, &key, "").to_vec(),
                 app_key: key,
                 app_name: acc.app_name,
                 bundle_id: acc.bundle_id,
@@ -487,7 +554,7 @@ pub fn project_breakdown(conn: &Connection, project_id: i64) -> rusqlite::Result
     let mut totals: HashMap<String, i64> = HashMap::new();
     for seg in read_segments(conn, None)? {
         let date = seg.local_date();
-        if assigns.resolve(&date, &seg.key(), &seg.title()) == Some(project_id) {
+        if assigns.resolve(&date, &seg.key(), &seg.title()).contains(&project_id) {
             *totals.entry(date).or_insert(0) += seg.duration();
         }
     }
@@ -538,7 +605,7 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
         let date = seg.local_date();
         let key = seg.key();
         let title = seg.title();
-        if assigns.resolve(&date, &key, &title) != Some(project_id) {
+        if !assigns.resolve(&date, &key, &title).contains(&project_id) {
             continue;
         }
         let acc = by_app.entry(key).or_insert_with(|| AppAcc {
@@ -718,16 +785,16 @@ mod tests {
         let side = create_project(&conn, "Side", "#000").unwrap();
         seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("x"));
         seg(&conn, s + 100, s + 200, Some("com.a"), Some("A"), Some("y"));
-        set_assignment(&conn, d, "com.a", "", Some(work.id)).unwrap();
-        set_assignment(&conn, d, "com.a", "y", Some(side.id)).unwrap();
+        add_assignment(&conn, d, "com.a", "", work.id).unwrap();
+        add_assignment(&conn, d, "com.a", "y", side.id).unwrap();
 
         let view = day_view(&conn, d).unwrap();
         let app = &view.apps[0];
-        assert_eq!(app.project_id, Some(work.id)); // app-level link
+        assert_eq!(app.project_ids, vec![work.id]); // app-level tag
         let tx = app.titles.iter().find(|t| t.title == "x").unwrap();
         let ty = app.titles.iter().find(|t| t.title == "y").unwrap();
-        assert_eq!(tx.project_id, None); // inherits app-level, no own link
-        assert_eq!(ty.project_id, Some(side.id)); // explicit title link wins
+        assert!(tx.project_ids.is_empty()); // inherits app-level, no own tag
+        assert_eq!(ty.project_ids, vec![side.id]); // explicit title tag
     }
 
     // ---- project_breakdown ------------------------------------------------
@@ -749,11 +816,11 @@ mod tests {
         // Day 1: two titles, only an app-level assignment -> both count.
         seg(&conn, s1, s1 + 100, Some("com.a"), Some("A"), Some("x"));
         seg(&conn, s1 + 100, s1 + 150, Some("com.a"), Some("A"), Some("y"));
-        set_assignment(&conn, d1, "com.a", "", Some(work.id)).unwrap();
+        add_assignment(&conn, d1, "com.a", "", work.id).unwrap();
         // Day 2: only a title-level assignment on x -> only x counts.
         seg(&conn, s2, s2 + 200, Some("com.a"), Some("A"), Some("x"));
         seg(&conn, s2 + 200, s2 + 260, Some("com.a"), Some("A"), Some("y"));
-        set_assignment(&conn, d2, "com.a", "x", Some(work.id)).unwrap();
+        add_assignment(&conn, d2, "com.a", "x", work.id).unwrap();
 
         let bd = project_breakdown(&conn, work.id).unwrap();
         // Newest day first.
@@ -773,8 +840,8 @@ mod tests {
         let s = day_start_ts(d);
         seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("x"));
         seg(&conn, s + 100, s + 130, Some("com.a"), Some("A"), Some("y"));
-        set_assignment(&conn, d, "com.a", "", Some(work.id)).unwrap();
-        set_assignment(&conn, d, "com.a", "y", Some(other.id)).unwrap();
+        add_assignment(&conn, d, "com.a", "", work.id).unwrap();
+        add_assignment(&conn, d, "com.a", "y", other.id).unwrap();
 
         let work_bd = project_breakdown(&conn, work.id).unwrap();
         assert_eq!(work_bd.len(), 1);
@@ -795,7 +862,7 @@ mod tests {
         let s = day_start_ts(d);
         seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("x"));
         seg(&conn, s + 100, s + 150, Some("com.a"), Some("A"), Some("y"));
-        set_assignment(&conn, d, "com.a", "", Some(work.id)).unwrap();
+        add_assignment(&conn, d, "com.a", "", work.id).unwrap();
         set_note(&conn, work.id, "com.a", "", "app note").unwrap();
         set_note(&conn, work.id, "com.a", "x", "x note").unwrap();
 
@@ -818,7 +885,7 @@ mod tests {
         let d = "2026-03-10";
         let s = day_start_ts(d);
         seg(&conn, s, s + 100, Some("com.a"), Some("A"), None);
-        set_assignment(&conn, d, "com.a", "", Some(work.id)).unwrap();
+        add_assignment(&conn, d, "com.a", "", work.id).unwrap();
         set_note(&conn, work.id, "com.a", "", "app note").unwrap();
 
         let apps = project_apps(&conn, work.id).unwrap();
@@ -877,36 +944,149 @@ mod tests {
         let work = create_project(&conn, "Work", "#fff").unwrap();
         let other = create_project(&conn, "Other", "#000").unwrap();
         let d = "2026-03-10";
-        set_assignment(&conn, d, "com.a", "", Some(work.id)).unwrap();
-        set_assignment(&conn, d, "com.a", "y", Some(other.id)).unwrap();
+        add_assignment(&conn, d, "com.a", "", work.id).unwrap();
+        add_assignment(&conn, d, "com.a", "y", other.id).unwrap();
 
         let a = Assignments::load(&conn).unwrap();
-        assert_eq!(a.resolve(d, "com.a", "x"), Some(work.id)); // app-level fallback
-        assert_eq!(a.resolve(d, "com.a", "y"), Some(other.id)); // title link wins
-        assert_eq!(a.resolve(d, "com.z", "x"), None); // unknown app
+        assert_eq!(a.resolve(d, "com.a", "x"), [work.id]); // app-level fallback
+        assert_eq!(a.resolve(d, "com.a", "y"), [other.id]); // title tag overrides
+        assert!(a.resolve(d, "com.z", "x").is_empty()); // unknown app
     }
 
     #[test]
-    fn assignments_link_is_exact_with_no_fallback() {
+    fn assignments_links_are_exact_with_no_fallback() {
         let conn = mem();
         let work = create_project(&conn, "Work", "#fff").unwrap();
         let d = "2026-03-10";
-        set_assignment(&conn, d, "com.a", "", Some(work.id)).unwrap();
+        add_assignment(&conn, d, "com.a", "", work.id).unwrap();
 
         let a = Assignments::load(&conn).unwrap();
-        assert_eq!(a.link(d, "com.a", ""), Some(work.id)); // explicit app-level
-        assert_eq!(a.link(d, "com.a", "x"), None); // no fallback to app-level
+        assert_eq!(a.links(d, "com.a", ""), [work.id]); // explicit app-level
+        assert!(a.links(d, "com.a", "x").is_empty()); // no fallback to app-level
     }
 
     #[test]
     fn assignments_load_day_scopes_to_one_date() {
         let conn = mem();
         let work = create_project(&conn, "Work", "#fff").unwrap();
-        set_assignment(&conn, "2026-03-10", "com.a", "", Some(work.id)).unwrap();
-        set_assignment(&conn, "2026-03-11", "com.b", "", Some(work.id)).unwrap();
+        add_assignment(&conn, "2026-03-10", "com.a", "", work.id).unwrap();
+        add_assignment(&conn, "2026-03-11", "com.b", "", work.id).unwrap();
 
         let a = Assignments::load_day(&conn, "2026-03-10").unwrap();
-        assert_eq!(a.link("2026-03-10", "com.a", ""), Some(work.id));
-        assert_eq!(a.link("2026-03-11", "com.b", ""), None); // other day not loaded
+        assert_eq!(a.links("2026-03-10", "com.a", ""), [work.id]);
+        assert!(a.links("2026-03-11", "com.b", "").is_empty()); // other day not loaded
+    }
+
+    // ---- tag semantics (many-to-many) -------------------------------------
+
+    #[test]
+    fn tagging_two_projects_on_same_entry_bills_both_in_full() {
+        let conn = mem();
+        // Create P_high first so ids are unordered relative to insertion below,
+        // proving day_view sorts the project ids.
+        let p2 = create_project(&conn, "P2", "#000").unwrap();
+        let p1 = create_project(&conn, "P1", "#fff").unwrap();
+        let lo = p1.id.min(p2.id);
+        let hi = p1.id.max(p2.id);
+
+        let d = "2026-03-10";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("x"));
+        // Tag the same (date, key, title) with both projects (insert hi first).
+        add_assignment(&conn, d, "com.a", "x", hi).unwrap();
+        add_assignment(&conn, d, "com.a", "x", lo).unwrap();
+
+        // day_view surfaces both ids, sorted ascending.
+        let view = day_view(&conn, d).unwrap();
+        let tx = view.apps[0].titles.iter().find(|t| t.title == "x").unwrap();
+        assert_eq!(tx.project_ids, vec![lo, hi]);
+
+        // Each project is billed the FULL duration (overlap is by design).
+        let bd1 = project_breakdown(&conn, p1.id).unwrap();
+        assert_eq!(bd1.len(), 1);
+        assert_eq!(bd1[0].seconds, 100);
+        let bd2 = project_breakdown(&conn, p2.id).unwrap();
+        assert_eq!(bd2.len(), 1);
+        assert_eq!(bd2[0].seconds, 100);
+    }
+
+    #[test]
+    fn remove_assignment_removes_only_the_named_project() {
+        let conn = mem();
+        let p1 = create_project(&conn, "P1", "#fff").unwrap();
+        let p2 = create_project(&conn, "P2", "#000").unwrap();
+        let d = "2026-03-10";
+        add_assignment(&conn, d, "com.a", "x", p1.id).unwrap();
+        add_assignment(&conn, d, "com.a", "x", p2.id).unwrap();
+
+        remove_assignment(&conn, d, "com.a", "x", p1.id).unwrap();
+
+        let a = Assignments::load(&conn).unwrap();
+        assert_eq!(a.links(d, "com.a", "x"), [p2.id]); // only p1's tag removed
+    }
+
+    #[test]
+    fn resolve_title_tags_override_app_level_no_union() {
+        let conn = mem();
+        let p1 = create_project(&conn, "P1", "#fff").unwrap();
+        let p2 = create_project(&conn, "P2", "#000").unwrap();
+        let d = "2026-03-10";
+        add_assignment(&conn, d, "com.a", "", p1.id).unwrap(); // app-level
+        add_assignment(&conn, d, "com.a", "x", p2.id).unwrap(); // title
+
+        let a = Assignments::load(&conn).unwrap();
+        // Title's own tag wins outright; the app-level tag is NOT unioned in.
+        assert_eq!(a.resolve(d, "com.a", "x"), [p2.id]);
+    }
+
+    // ---- migration --------------------------------------------------------
+
+    #[test]
+    fn migrate_assignments_multi_preserves_rows_and_enables_tagging() {
+        // Build an OLD-schema table by hand: project_id is NOT in the PK.
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE day_assignments (
+                date       TEXT NOT NULL,
+                app_key    TEXT NOT NULL,
+                title      TEXT NOT NULL DEFAULT '',
+                project_id INTEGER NOT NULL,
+                PRIMARY KEY (date, app_key, title)
+             );
+             INSERT INTO day_assignments (date, app_key, title, project_id)
+                VALUES ('2026-03-10', 'com.a', 'x', 1),
+                       ('2026-03-10', 'com.a', '', 2);",
+        )
+        .unwrap();
+
+        // Before: a second project on the same (date, key, title) collides.
+        assert!(conn
+            .execute(
+                "INSERT INTO day_assignments (date, app_key, title, project_id)
+                 VALUES ('2026-03-10', 'com.a', 'x', 9)",
+                [],
+            )
+            .is_err());
+
+        migrate_assignments_multi(&conn).unwrap();
+
+        // Existing rows survive the rebuild.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM day_assignments", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+        let a = Assignments::load(&conn).unwrap();
+        assert_eq!(a.links("2026-03-10", "com.a", "x"), [1]);
+        assert_eq!(a.links("2026-03-10", "com.a", ""), [2]);
+
+        // After: a second project for the same key is now insertable.
+        add_assignment(&conn, "2026-03-10", "com.a", "x", 9).unwrap();
+        let a = Assignments::load(&conn).unwrap();
+        assert_eq!(a.links("2026-03-10", "com.a", "x"), [1, 9]);
+
+        // A second migration run is a no-op (schema already new).
+        migrate_assignments_multi(&conn).unwrap();
+        let a = Assignments::load(&conn).unwrap();
+        assert_eq!(a.links("2026-03-10", "com.a", "x"), [1, 9]);
     }
 }

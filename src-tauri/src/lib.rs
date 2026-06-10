@@ -38,15 +38,27 @@ fn delete_project(state: State<'_, DbState>, id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_assignment(
+fn add_assignment(
     state: State<'_, DbState>,
     date: String,
     app_key: String,
     title: String,
-    project_id: Option<i64>,
+    project_id: i64,
 ) -> Result<(), String> {
     let conn = state.lock().map_err(|e| e.to_string())?;
-    db::set_assignment(&conn, &date, &app_key, &title, project_id).map_err(|e| e.to_string())
+    db::add_assignment(&conn, &date, &app_key, &title, project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_assignment(
+    state: State<'_, DbState>,
+    date: String,
+    app_key: String,
+    title: String,
+    project_id: i64,
+) -> Result<(), String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::remove_assignment(&conn, &date, &app_key, &title, project_id).map_err(|e| e.to_string())
 }
 
 /// Whether the app has macOS Accessibility permission (needed for window titles).
@@ -159,7 +171,8 @@ pub fn run() {
             list_projects,
             create_project,
             delete_project,
-            set_assignment,
+            add_assignment,
+            remove_assignment,
             project_breakdown,
             project_apps,
             set_note,
