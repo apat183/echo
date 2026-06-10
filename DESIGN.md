@@ -181,6 +181,20 @@ Commands: `get_day_view` · `list_projects` · `create_project` · `delete_proje
 - Project view now shows a **per-app breakdown** under the total (`project_apps` command),
   with the same title-aware resolution as the day/week/month buckets.
 
+**Session — status bar lifecycle (done; interactive verification pending):** Native tray
+menu (greyed live "Today: Xh Ym" line + tooltip, Pause/Resume time tracking, Open,
+Quit). Closing the window now hides to the menu bar and drops the dock icon
+(`ActivationPolicy::Accessory`); Open restores both. The open segment moved into
+shared `TrackerState` (`tracker.rs`), so pause and quit flush it —
+**fixing silent loss of the in-progress segment on quit**. Pause is in-memory
+only; every launch starts tracking. `tray.rs` owns the menu; the ~2s poller
+tick push-updates the readout (deduped via a last-rendered cache). Locks recover
+from poisoning so one panic can't brick tracking or the exit flush. 9 unit
+tests (tracker/poller/db). Spec:
+`docs/superpowers/specs/2026-06-10-status-bar-lifecycle-design.md`.
+Known follow-up: `db.rs` local-midnight helpers still `.expect()` on
+DST-ambiguous times — now on the poller's recurring path, worth de-panicking.
+
 ---
 
 ## Next up (agreed roadmap)
