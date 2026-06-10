@@ -439,6 +439,13 @@ body {
   border-radius: 5px;
   cursor: pointer;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.icon-btn svg {
+  display: block;
 }
 
 .seg.active {
@@ -524,11 +531,11 @@ body {
 
 .disclosure {
   flex-shrink: 0;
-  width: 16px;
+  width: 18px;
   border: none;
   background: transparent;
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 12.5px;
   line-height: 1;
   cursor: pointer;
   padding: 0;
@@ -569,7 +576,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px 6px 54px; /* indent under the app badge */
+  padding: 6px 8px 6px 56px; /* indent under the app badge */
   border-radius: 7px;
   cursor: grab;
 }
@@ -643,6 +650,29 @@ body {
   opacity: 0.7;
 }
 
+.title-row.tiny-agg {
+  border: none;
+  background: transparent;
+  font: inherit;
+  width: 100%;
+  text-align: left;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.title-row.tiny-agg:hover {
+  background: var(--hover);
+}
+
+.disclosure-inline {
+  flex-shrink: 0;
+  width: 18px;
+  font-size: 12.5px;
+  line-height: 1;
+  text-align: center;
+  color: var(--text-dim);
+}
+
 /* ---- project view: app breakdown ---- */
 
 .section-label {
@@ -686,7 +716,7 @@ body {
 /* notes + title drill-down inside the project view */
 
 .entry-note-wrap {
-  padding: 0 8px 6px 53px; /* align under the app name */
+  padding: 0 8px 6px 55px; /* align under the app name */
 }
 
 .entry-note-wrap.title {

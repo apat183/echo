@@ -1,18 +1,20 @@
 // A small day/week/month-style segmented control, reused by both panes.
+import type { ReactNode } from "react";
+
 export function Segmented<T extends string>(props: {
   value: T;
-  options: [T, string][];
+  options: { value: T; label: string; icon?: ReactNode }[];
   onChange: (v: T) => void;
 }) {
   return (
     <div className="segmented">
-      {props.options.map(([v, label]) => (
+      {props.options.map((o) => (
         <button
-          key={v}
-          className={props.value === v ? "seg active" : "seg"}
-          onClick={() => props.onChange(v)}
+          key={o.value}
+          className={props.value === o.value ? "seg active" : "seg"}
+          onClick={() => props.onChange(o.value)}
         >
-          {label}
+          {o.icon}{o.label}
         </button>
       ))}
     </div>

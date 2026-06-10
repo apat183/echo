@@ -14,10 +14,11 @@ import {
 } from "../api";
 import { rollup, type Granularity } from "../period";
 import { loadAppIcon } from "../appIcon";
+import { Calendar, CalendarDays, CalendarRange } from "lucide-react";
 import { Segmented } from "./Segmented";
 
-export function ProjectPane(props: { project?: Project; onDeleted: () => void }) {
-  const { project, onDeleted } = props;
+export function ProjectPane(props: { project?: Project }) {
+  const { project } = props;
   const [rows, setRows] = useState<DayTotal[]>([]);
   const [apps, setApps] = useState<ProjectApp[]>([]);
   const [gran, setGran] = useState<Granularity>("week");
@@ -50,26 +51,12 @@ export function ProjectPane(props: { project?: Project; onDeleted: () => void })
         <Segmented
           value={gran}
           options={[
-            ["day", "Day"],
-            ["week", "Week"],
-            ["month", "Month"],
+            { value: "day" as Granularity, label: "Day", icon: <Calendar size={13} /> },
+            { value: "week" as Granularity, label: "Week", icon: <CalendarRange size={13} /> },
+            { value: "month" as Granularity, label: "Month", icon: <CalendarDays size={13} /> },
           ]}
           onChange={setGran}
         />
-        <button
-          className="icon-btn danger"
-          title="Delete project"
-          onClick={async () => {
-            const confirmed = window.confirm(
-              `Delete "${project.name}"?\n\nAssigned activity will be unassigned. This cannot be undone.`
-            );
-            if (!confirmed) return;
-            await api.deleteProject(project.id);
-            onDeleted();
-          }}
-        >
-          Delete
-        </button>
       </header>
 
       <div className="pane-body">

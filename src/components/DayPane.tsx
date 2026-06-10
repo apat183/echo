@@ -3,9 +3,10 @@
 // a project in the sidebar.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Calendar, CalendarDays, CalendarRange, ChevronLeft, ChevronRight } from "lucide-react";
 import { api, appColor, fmtDur, initials, type Project, toDateStr } from "../api";
 import { type DragPayload, startDrag } from "../drag";
-import { mergeDayViews, type PeriodAppUsage, type PeriodView, type RowProject } from "../merge";
+import { mergeDayViews, partitionTitles, type PeriodAppUsage, type PeriodTitleUsage, type PeriodView, type RowProject } from "../merge";
 import { type Granularity, periodDates, periodLabel, samePeriod, shiftPeriod } from "../period";
 import { loadAppIcon } from "../appIcon";
 import { Segmented } from "./Segmented";
@@ -65,7 +66,7 @@ export function DayPane(props: {
       <header className="pane-header">
         <div className="date-nav">
           <button className="icon-btn" onClick={() => setDate(shiftPeriod(date, gran, -1))}>
-            ‹
+            <ChevronLeft size={16} />
           </button>
           <button className="today-btn" onClick={() => setDate(toDateStr(new Date()))}>
             {isCurrentPeriod ? currentLabel : label}
@@ -75,15 +76,15 @@ export function DayPane(props: {
             disabled={isCurrentPeriod}
             onClick={() => setDate(shiftPeriod(date, gran, 1))}
           >
-            ›
+            <ChevronRight size={16} />
           </button>
         </div>
         <Segmented
           value={gran}
           options={[
-            ["day", "Day"],
-            ["week", "Week"],
-            ["month", "Month"],
+            { value: "day" as Granularity, label: "Day", icon: <Calendar size={13} /> },
+            { value: "week" as Granularity, label: "Week", icon: <CalendarRange size={13} /> },
+            { value: "month" as Granularity, label: "Month", icon: <CalendarDays size={13} /> },
           ]}
           onChange={setGran}
         />
@@ -121,9 +122,9 @@ export function DayPane(props: {
               key={a.app_key}
               app={a}
               projectById={projectById}
-              onUnassign={async (title, dates) => {
+              onUnassign={async (title, projectId, dates) => {
                 await Promise.all(
-                  dates.map((d) => api.setAssignment(d, a.app_key, title, null))
+                  dates.map((d) => api.removeAssignment(d, a.app_key, title, projectId))
                 );
                 await load();
                 onAssignmentChange();
@@ -142,7 +143,7 @@ export function DayPane(props: {
 function ProjectDots(props: {
   projects: RowProject[];
   projectById: Map<number, Project>;
-  onUnassign: (dates: string[]) => void;
+  onUnassign: (projectId: number, dates: string[]) => void;
 }) {
   if (props.projects.length === 0) return null;
   return (
@@ -158,7 +159,7 @@ function ProjectDots(props: {
             title={`${proj.name} — click to unassign`}
             onClick={(e) => {
               e.stopPropagation();
-              props.onUnassign(p.dates);
+              props.onUnassign(p.id, p.dates);
             }}
           />
         );
@@ -170,7 +171,7 @@ function ProjectDots(props: {
 function AppRow(props: {
   app: PeriodAppUsage;
   projectById: Map<number, Project>;
-  onUnassign: (title: string, dates: string[]) => void;
+  onUnassign: (title: string, projectId: number, dates: string[]) => void;
   onDragStart: (payload: DragPayload) => void;
   onDragEnd: () => void;
 }) {
@@ -237,7 +238,7 @@ function AppRow(props: {
           <ProjectDots
             projects={app.projects}
             projectById={projectById}
-            onUnassign={(dates) => props.onUnassign("", dates)}
+            onUnassign={(projectId, dates) => props.onUnassign("", projectId, dates)}
           />
           {canExpand && (
             <span className="title-count" title={`${app.titles.length} window titles`}>
@@ -250,49 +251,87 @@ function AppRow(props: {
       </div>
 
       {expanded && (
-        <div className="title-list">
-          {app.titles.map((t) => {
-            // Untitled time shares the app-level key (""); assign it via the app row,
-            // not by dragging this row, to avoid assigning the whole app by accident.
-            const isUntitled = t.title.trim() === "";
-            return (
-              <div
-                key={t.title || "(untitled)"}
-                className={`title-row ${isUntitled ? "untitled" : ""}`}
-                draggable={!isUntitled}
-                onDragStart={
-                  isUntitled
-                    ? undefined
-                    : (e) => {
-                        const payload: DragPayload = {
-                          appKey: app.app_key,
-                          title: t.title,
-                          dates: t.dates,
-                        };
-                        startDrag(e, payload);
-                        props.onDragStart(payload);
-                      }
-                }
-                onDragEnd={isUntitled ? undefined : props.onDragEnd}
-                title={
-                  isUntitled
-                    ? "Untitled windows — assign via the app row"
-                    : "Drag this title onto a project"
-                }
-              >
-                <span className="title-name">{isUntitled ? "Untitled" : t.title}</span>
-                {!isUntitled && (
-                  <ProjectDots
-                    projects={t.projects}
-                    projectById={projectById}
-                    onUnassign={(dates) => props.onUnassign(t.title, dates)}
-                  />
-                )}
-                <span className="title-time">{fmtDur(t.seconds)}</span>
-              </div>
-            );
-          })}
-        </div>
+        <TitleList
+          app={app}
+          projectById={projectById}
+          onUnassign={props.onUnassign}
+          onDragStart={props.onDragStart}
+          onDragEnd={props.onDragEnd}
+        />
+      )}
+    </div>
+  );
+}
+
+function TitleList(props: {
+  app: PeriodAppUsage;
+  projectById: Map<number, Project>;
+  onUnassign: (title: string, projectId: number, dates: string[]) => void;
+  onDragStart: (payload: DragPayload) => void;
+  onDragEnd: () => void;
+}) {
+  const { app, projectById } = props;
+  const [showTiny, setShowTiny] = useState(false);
+  const { major, tiny } = partitionTitles(app.titles);
+
+  const renderTitleRow = (t: PeriodTitleUsage) => {
+    const isUntitled = t.title.trim() === "";
+    return (
+      <div
+        key={t.title || "(untitled)"}
+        className={`title-row ${isUntitled ? "untitled" : ""}`}
+        draggable={!isUntitled}
+        onDragStart={
+          isUntitled
+            ? undefined
+            : (e) => {
+                const payload: DragPayload = {
+                  appKey: app.app_key,
+                  title: t.title,
+                  dates: t.dates,
+                };
+                startDrag(e, payload);
+                props.onDragStart(payload);
+              }
+        }
+        onDragEnd={isUntitled ? undefined : props.onDragEnd}
+        title={
+          isUntitled
+            ? "Untitled windows — assign via the app row"
+            : "Drag this title onto a project"
+        }
+      >
+        <span className="title-name">{isUntitled ? "Untitled" : t.title}</span>
+        {!isUntitled && (
+          <ProjectDots
+            projects={t.projects}
+            projectById={projectById}
+            onUnassign={(projectId, dates) => props.onUnassign(t.title, projectId, dates)}
+          />
+        )}
+        <span className="title-time">{fmtDur(t.seconds)}</span>
+      </div>
+    );
+  };
+
+  const tinySeconds = tiny.reduce((s, t) => s + t.seconds, 0);
+
+  return (
+    <div className="title-list">
+      {major.map(renderTitleRow)}
+      {tiny.length > 0 && (
+        <>
+          <button
+            type="button"
+            className="title-row tiny-agg"
+            onClick={() => setShowTiny((v) => !v)}
+          >
+            <span className="disclosure-inline">{showTiny ? "▾" : "▸"}</span>
+            <span className="title-name">{tiny.length} items under a minute</span>
+            <span className="title-time">{fmtDur(tinySeconds)}</span>
+          </button>
+          {showTiny && tiny.map(renderTitleRow)}
+        </>
       )}
     </div>
   );

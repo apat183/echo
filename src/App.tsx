@@ -27,7 +27,7 @@ export default function App() {
       const dates = [...new Set(payload.dates)];
       if (dates.length === 0) return;
       await Promise.all(
-        dates.map((d) => api.setAssignment(d, payload.appKey, payload.title, projectId))
+        dates.map((d) => api.addAssignment(d, payload.appKey, payload.title, projectId))
       );
       setAssignmentVersion((v) => v + 1);
       await refreshProjects();
@@ -61,10 +61,6 @@ export default function App() {
         ) : (
           <ProjectPane
             project={projects.find((p) => p.id === selection.id)}
-            onDeleted={() => {
-              setSelection({ kind: "day" });
-              refreshProjects();
-            }}
           />
         )}
       </main>
