@@ -2,11 +2,11 @@ mod ax;
 mod db;
 mod poller;
 mod tracker;
+mod tray;
 
 use db::{DayTotal, DayView, Project, ProjectApp, DbState};
 use std::sync::{Arc, Mutex};
 use tracker::TrackerState;
-use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, State};
 
 #[tauri::command]
@@ -133,12 +133,9 @@ pub fn run() {
             let track = Arc::new(TrackerState::default());
             app.manage(track.clone());
 
-            poller::spawn(shared, track);
+            tray::init(app)?;
 
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().expect("default icon").clone())
-                .tooltip("TimeTracker — tracking")
-                .build(app)?;
+            poller::spawn(shared, track);
 
             Ok(())
         })
