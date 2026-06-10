@@ -325,6 +325,7 @@ function TitleList(props: {
             type="button"
             className="title-row tiny-agg"
             onClick={() => setShowTiny((v) => !v)}
+            aria-expanded={showTiny}
           >
             <span className="disclosure-inline">{showTiny ? "▾" : "▸"}</span>
             <span className="title-name">{tiny.length} items under a minute</span>
