@@ -42,7 +42,7 @@ export function ProjectPane(props: { project?: Project }) {
 
   return (
     <>
-      <header className="pane-header">
+      <header className="pane-header" data-tauri-drag-region="">
         <div className="project-title">
           <span className="nav-dot" style={{ background: project.color }} />
           {project.name}

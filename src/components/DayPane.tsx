@@ -63,7 +63,7 @@ export function DayPane(props: {
 
   return (
     <>
-      <header className="pane-header">
+      <header className="pane-header" data-tauri-drag-region="">
         <div className="date-nav">
           <button className="icon-btn" onClick={() => setDate(shiftPeriod(date, gran, -1))}>
             <ChevronLeft size={16} />
