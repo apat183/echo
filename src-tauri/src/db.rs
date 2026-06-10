@@ -276,16 +276,20 @@ pub fn delete_project(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Persist a new display order for projects. `ids` is the complete ordered list
-/// of project ids; each project's `sort_order` is set to its index in the slice.
+/// Persist a new display order for projects. `ids` must be the **complete**
+/// ordered list of project ids; each project's `sort_order` is set to its
+/// index in the slice. An omitted project keeps its previous `sort_order` and
+/// may collide with a newly-assigned value; unknown ids are silently ignored.
+/// All updates are applied atomically in a single transaction.
 pub fn set_project_order(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
     for (i, &id) in ids.iter().enumerate() {
-        conn.execute(
+        tx.execute(
             "UPDATE projects SET sort_order = ?1 WHERE id = ?2",
             rusqlite::params![i as i64, id],
         )?;
     }
-    Ok(())
+    tx.commit()
 }
 
 // ---- assignments ----------------------------------------------------------
@@ -1220,6 +1224,23 @@ mod tests {
         assert_eq!(projects[1].id, a.id);
         assert_eq!(projects[2].id, b.id);
         assert_eq!(projects[3].id, d.id);
+    }
+
+    #[test]
+    fn set_project_order_unknown_id_is_ignored() {
+        let conn = mem();
+        let a = create_project(&conn, "A", "#aaa").unwrap();
+        let b = create_project(&conn, "B", "#bbb").unwrap();
+
+        // Establish a known order first.
+        set_project_order(&conn, &[a.id, b.id]).unwrap();
+
+        // Passing only an unknown id should succeed and leave existing order intact.
+        set_project_order(&conn, &[999]).unwrap();
+
+        let projects = list_projects(&conn).unwrap();
+        assert_eq!(projects[0].id, a.id);
+        assert_eq!(projects[1].id, b.id);
     }
 
     #[test]
