@@ -27,10 +27,17 @@ export type DayView = {
 
 export type DayTotal = { date: string; seconds: number };
 
+export type IgnoredEntry = {
+  app_key: string;
+  app_name: string | null;
+  title: string;
+  created_at: number;
+};
+
 export type ProjectTitle = {
   title: string; // "" = untitled
   seconds: number;
-  note: string | null;
+  can_remove: boolean;
 };
 
 export type ProjectApp = {
@@ -38,8 +45,13 @@ export type ProjectApp = {
   app_name: string;
   bundle_id: string | null;
   seconds: number;
-  note: string | null; // app-level note
   titles: ProjectTitle[];
+};
+
+export type ProjectPeriodNote = {
+  granularity: "day" | "week" | "month";
+  period_key: string;
+  note: string;
 };
 
 export const api = {
@@ -52,13 +64,30 @@ export const api = {
     invoke<void>("add_assignment", { date, appKey, title, projectId }),
   removeAssignment: (date: string, appKey: string, title: string, projectId: number) =>
     invoke<void>("remove_assignment", { date, appKey, title, projectId }),
+  removeProjectAppAssignments: (projectId: number, appKey: string) =>
+    invoke<void>("remove_project_app_assignments", { projectId, appKey }),
+  removeProjectTitleAssignments: (projectId: number, appKey: string, title: string) =>
+    invoke<void>("remove_project_title_assignments", { projectId, appKey, title }),
+  addIgnoredEntry: (appKey: string, appName: string | null, title: string) =>
+    invoke<void>("add_ignored_entry", { appKey, appName, title }),
+  listIgnoredEntries: () => invoke<IgnoredEntry[]>("list_ignored_entries"),
+  removeIgnoredEntry: (appKey: string, title: string) =>
+    invoke<void>("remove_ignored_entry", { appKey, title }),
+  ignoredBreakdown: () => invoke<DayTotal[]>("ignored_breakdown"),
   projectBreakdown: (projectId: number) =>
     invoke<DayTotal[]>("project_breakdown", { projectId }),
   projectApps: (projectId: number) =>
     invoke<ProjectApp[]>("project_apps", { projectId }),
+  listProjectPeriodNotes: (projectId: number) =>
+    invoke<ProjectPeriodNote[]>("list_project_period_notes", { projectId }),
+  setProjectPeriodNote: (
+    projectId: number,
+    granularity: ProjectPeriodNote["granularity"],
+    periodKey: string,
+    note: string,
+  ) =>
+    invoke<void>("set_project_period_note", { projectId, granularity, periodKey, note }),
   setProjectOrder: (ids: number[]) => invoke<void>("set_project_order", { ids }),
-  setNote: (projectId: number, appKey: string, title: string, note: string) =>
-    invoke<void>("set_note", { projectId, appKey, title, note }),
   appIcon: (bundleId: string | null) =>
     bundleId
       ? invoke<string | null>("app_icon_data_url", { bundleId })

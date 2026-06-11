@@ -10,7 +10,7 @@ import { mergeDayViews, partitionTitles, type PeriodAppUsage, type PeriodTitleUs
 import { type Granularity, periodDates, periodLabel, samePeriod, shiftPeriod } from "../period";
 import { loadAppIcon } from "../appIcon";
 import { Segmented } from "./Segmented";
-import { HourChart, MiniHourChart } from "./charts";
+import { MiniUsageChart, UsageChart } from "./charts";
 
 export function DayPane(props: {
   projects: Project[];
@@ -111,7 +111,7 @@ export function DayPane(props: {
         <h1 className="usage-total">{view ? fmtDur(view.total_seconds) : "—"}</h1>
         <p className="usage-sub">{view?.label ?? label} · tracked time</p>
 
-        {view && <HourChart hours={view.hours} />}
+        {view && <UsageChart buckets={view.timeline} granularity={gran} />}
 
         <div className="app-list">
           {view?.apps.length === 0 && (
@@ -207,7 +207,12 @@ function AppRow(props: {
         className="app-row"
         draggable
         onDragStart={(e) => {
-          const payload: DragPayload = { appKey: app.app_key, title: "", dates: app.dates };
+          const payload: DragPayload = {
+            appKey: app.app_key,
+            appName: app.app_name,
+            title: "",
+            dates: app.dates,
+          };
           startDrag(e, payload);
           props.onDragStart(payload);
         }}
@@ -246,7 +251,7 @@ function AppRow(props: {
             </span>
           )}
         </span>
-        <MiniHourChart hours={app.hours} color={color} />
+        <MiniUsageChart buckets={app.timeline} color={color} />
         <span className="app-time">{fmtDur(app.seconds)}</span>
       </div>
 
@@ -287,6 +292,7 @@ function TitleList(props: {
             : (e) => {
                 const payload: DragPayload = {
                   appKey: app.app_key,
+                  appName: app.app_name,
                   title: t.title,
                   dates: t.dates,
                 };

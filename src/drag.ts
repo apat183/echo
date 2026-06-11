@@ -5,14 +5,14 @@
 import type { DragEvent as ReactDragEvent } from "react";
 
 // title "" = whole-app (app-level) drag; otherwise a single title row.
-export type DragPayload = { appKey: string; title: string; dates: string[] };
+export type DragPayload = { appKey: string; appName: string; title: string; dates: string[] };
 
 export function startDrag(e: ReactDragEvent, payload: DragPayload) {
   const encoded = JSON.stringify(payload);
   e.dataTransfer.setData("application/x-echo-app", encoded);
   e.dataTransfer.setData("application/x-app", encoded);
   e.dataTransfer.setData("text/plain", payload.appKey);
-  e.dataTransfer.effectAllowed = "link";
+  e.dataTransfer.effectAllowed = "linkMove";
   e.stopPropagation();
 }
 
@@ -24,8 +24,9 @@ export function parseDragPayload(dataTransfer: DataTransfer): DragPayload | null
       const parsed = JSON.parse(raw) as Partial<DragPayload>;
       if (typeof parsed.appKey === "string" && Array.isArray(parsed.dates)) {
         const dates = parsed.dates.filter((d): d is string => typeof d === "string");
+        const appName = typeof parsed.appName === "string" ? parsed.appName : parsed.appKey;
         const title = typeof parsed.title === "string" ? parsed.title : "";
-        if (dates.length > 0) return { appKey: parsed.appKey, title, dates };
+        if (dates.length > 0) return { appKey: parsed.appKey, appName, title, dates };
       }
     } catch {
       return null;

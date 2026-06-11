@@ -2,10 +2,16 @@
 // creation. Each project row doubles as a drop target for dragged app/title
 // time (ProjectNavItem) and a drag source for reordering.
 
-import { type MouseEvent, type RefObject, useRef, useState } from "react";
-import { PanelLeftClose, PanelLeftOpen, Trash2 } from "lucide-react";
+import {
+  type CSSProperties,
+  type MouseEvent,
+  type RefObject,
+  useRef,
+  useState,
+} from "react";
+import { Activity, Ban, PanelLeftClose, PanelLeftOpen, Trash2 } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { api, PROJECT_COLORS, type Project } from "../api";
+import { api, initials, PROJECT_COLORS, type Project } from "../api";
 import {
   type DragPayload,
   isProjectDrag,
@@ -14,9 +20,8 @@ import {
   reorderIds,
   startProjectDrag,
 } from "../drag";
-import logo from "../assets/app-icon.png";
 
-export type Selection = { kind: "day" } | { kind: "project"; id: number };
+export type Selection = { kind: "day" } | { kind: "ignored" } | { kind: "project"; id: number };
 
 export function Sidebar(props: {
   projects: Project[];
@@ -26,6 +31,7 @@ export function Sidebar(props: {
   dragPayload: DragPayload | null;
   getDragPayload: () => DragPayload | null;
   onAssignApp: (payload: DragPayload, projectId: number) => Promise<void>;
+  onIgnoreApp: (payload: DragPayload) => Promise<void>;
 }) {
   const {
     projects,
@@ -35,12 +41,14 @@ export function Sidebar(props: {
     dragPayload,
     getDragPayload,
     onAssignApp,
+    onIgnoreApp,
   } = props;
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem("echo.sidebar-collapsed") === "1"
   );
+  const [ignoreOver, setIgnoreOver] = useState(false);
   // Live ref for the in-flight project drag — WKWebView may drop custom
   // dataTransfer payloads between dragStart and drop.
   const draggingProject = useRef<number | null>(null);
@@ -74,24 +82,15 @@ export function Sidebar(props: {
       {/* Draggable strip behind the macOS traffic-light buttons */}
       <div className="sidebar-titlebar" data-tauri-drag-region="" />
 
-      <div className="sidebar-brand" data-tauri-drag-region="">
-        {!collapsed && <img className="brand-logo" src={logo} alt="" data-tauri-drag-region="" />}
-        {!collapsed && <span className="brand-name" data-tauri-drag-region="">Echo</span>}
-        <button
-          className="icon-btn collapse-btn"
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          onClick={toggleCollapsed}
-        >
-          {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
-        </button>
-      </div>
-
       <button
-        className={`nav-item ${selection.kind === "day" ? "active" : ""}`}
+        className={`nav-item activities-nav ${selection.kind === "day" ? "active" : ""}`}
         title="Activities"
         onClick={() => onSelect({ kind: "day" })}
       >
-        <span className="nav-dot activities" /> {!collapsed && "Activities"}
+        <span className="activity-icon">
+          <Activity size={16} />
+        </span>
+        {!collapsed && <span className="activity-label">Activities</span>}
       </button>
 
       <div className="sidebar-section">
@@ -136,6 +135,61 @@ export function Sidebar(props: {
           collapsed={collapsed}
         />
       ))}
+
+      <div className="sidebar-bottom">
+        <button
+          type="button"
+          className={`nav-item ignore-target ${
+            selection.kind === "ignored" ? "active" : ""
+          } ${ignoreOver ? "drop-over" : ""}`}
+          title="Ignore dragged activity"
+          onClick={() => onSelect({ kind: "ignored" })}
+          onDragEnter={(e) => {
+            if (isProjectDrag(e.dataTransfer.types)) return;
+            e.preventDefault();
+            setIgnoreOver(true);
+          }}
+          onDragOver={(e) => {
+            if (isProjectDrag(e.dataTransfer.types)) {
+              e.dataTransfer.dropEffect = "none";
+              return;
+            }
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+            setIgnoreOver(true);
+          }}
+          onDragLeave={() => setIgnoreOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setIgnoreOver(false);
+            if (isProjectDrag(e.dataTransfer.types)) return;
+
+            const payload = getDragPayload() ?? parseDragPayload(e.dataTransfer) ?? dragPayload;
+            if (!payload) return;
+            void onIgnoreApp(payload).catch((err) => {
+              console.error("Failed to ignore activity", err);
+            });
+          }}
+        >
+          <span className="ignore-icon">
+            <Ban size={16} />
+          </span>
+          {!collapsed && <span>Ignore</span>}
+        </button>
+
+        <button
+          type="button"
+          className="nav-item collapse-nav"
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          onClick={toggleCollapsed}
+        >
+          <span className="collapse-icon">
+            {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+          </span>
+          {!collapsed && <span>{collapsed ? "Expand" : "Collapse"}</span>}
+        </button>
+      </div>
     </aside>
   );
 }
@@ -254,7 +308,16 @@ function ProjectNavItem(props: {
         });
       }}
     >
-      <span className="nav-dot" style={{ background: project.color }} />
+      {collapsed ? (
+        <span
+          className="project-initials"
+          style={{ "--project-color": project.color } as CSSProperties}
+        >
+          {initials(project.name)}
+        </span>
+      ) : (
+        <span className="nav-dot" style={{ background: project.color }} />
+      )}
       {!collapsed && <span className="project-name">{project.name}</span>}
       {!collapsed && (
         <button className="row-action icon-btn danger" title="Delete project" onClick={handleDelete}>

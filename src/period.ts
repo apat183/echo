@@ -18,16 +18,20 @@ export function addHours(target: number[], source: number[]) {
 
 /** Local dates covered by the period containing `dateStr`, never past today. */
 export function periodDates(dateStr: string, gran: Granularity): string[] {
-  const start = periodStart(dateStr, gran);
-  let end = periodEnd(start, gran);
   const today = toDateStr(new Date());
-  if (end > today) end = today;
+  const dates = periodFrameDates(dateStr, gran).filter((d) => d <= today);
+  return dates.length > 0 ? dates : [periodStart(dateStr, gran)];
+}
 
+/** Local dates in the full visual frame for a period, including future empty days. */
+export function periodFrameDates(dateStr: string, gran: Granularity): string[] {
+  const start = periodStart(dateStr, gran);
+  const end = periodEnd(start, gran);
   const dates: string[] = [];
   for (let d = start; d <= end; d = addDays(d, 1)) {
     dates.push(d);
   }
-  return dates.length > 0 ? dates : [start];
+  return dates;
 }
 
 export function periodStart(dateStr: string, gran: Granularity): string {

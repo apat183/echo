@@ -6,6 +6,8 @@
 //!   day_assignments per-(local-day, app) tags linking time to projects, many-to-many
 //!                   (drag = "just that day", #7); one app/title can be tagged with
 //!                   several projects and each is billed the full duration
+//!   ignored_entries app/title rules excluded from activity totals and projects
+//!   project_period_notes per-project notes attached to day/week/month rollups
 //!
 //! All time aggregation attributes a segment to the LOCAL date of its start, so the
 //! daily view and project breakdown stay consistent.
@@ -13,7 +15,7 @@
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use rusqlite::Connection;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -65,12 +67,29 @@ pub struct DayTotal {
     pub seconds: i64,
 }
 
+/// One app/title rule excluded from activity totals and projects.
+#[derive(Debug, Serialize)]
+pub struct IgnoredEntry {
+    pub app_key: String,
+    pub app_name: Option<String>,
+    pub title: String,
+    pub created_at: i64,
+}
+
+/// A note attached to a project's day/week/month rollup bucket.
+#[derive(Debug, Serialize)]
+pub struct ProjectPeriodNote {
+    pub granularity: String,
+    pub period_key: String,
+    pub note: String,
+}
+
 /// One title contributing time to a project (drill-down under an app).
 #[derive(Debug, Serialize)]
 pub struct ProjectTitle {
     pub title: String, // "" = untitled
     pub seconds: i64,
-    pub note: Option<String>,
+    pub can_remove: bool,
 }
 
 /// One app contributing time to a project (for the project view's app breakdown).
@@ -80,7 +99,6 @@ pub struct ProjectApp {
     pub app_name: String,
     pub bundle_id: Option<String>,
     pub seconds: i64,
-    pub note: Option<String>, // app-level note (title = "")
     pub titles: Vec<ProjectTitle>,
 }
 
@@ -115,17 +133,26 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             PRIMARY KEY (date, app_key, title, project_id)
         );
 
-        CREATE TABLE IF NOT EXISTS entry_notes (
-            project_id INTEGER NOT NULL,
+        CREATE TABLE IF NOT EXISTS ignored_entries (
             app_key    TEXT NOT NULL,
-            title      TEXT NOT NULL DEFAULT '',  -- '' = app-level note
-            note       TEXT NOT NULL,
-            PRIMARY KEY (project_id, app_key, title)
+            app_name   TEXT,
+            title      TEXT NOT NULL DEFAULT '',  -- '' = app-level ignore
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (app_key, title)
+        );
+
+        CREATE TABLE IF NOT EXISTS project_period_notes (
+            project_id  INTEGER NOT NULL,
+            granularity TEXT NOT NULL, -- day | week | month
+            period_key  TEXT NOT NULL,
+            note        TEXT NOT NULL,
+            PRIMARY KEY (project_id, granularity, period_key)
         );",
     )?;
     migrate_assignments_title(&conn)?;
     migrate_assignments_multi(&conn)?;
     migrate_projects_sort_order(&conn)?;
+    migrate_ignored_entries_app_name(&conn)?;
     Ok(conn)
 }
 
@@ -221,6 +248,25 @@ fn migrate_projects_sort_order(conn: &Connection) -> rusqlite::Result<()> {
                   OR (p2.created_at = projects.created_at AND p2.id < projects.id)
              );",
         )?;
+    }
+    Ok(())
+}
+
+/// Older ignore tables did not store a display name. Keep the rules and add a
+/// nullable display-name column so the ignored view can show app names.
+fn migrate_ignored_entries_app_name(conn: &Connection) -> rusqlite::Result<()> {
+    let mut has_app_name = false;
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(ignored_entries)")?;
+        let cols = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for c in cols {
+            if c? == "app_name" {
+                has_app_name = true;
+            }
+        }
+    }
+    if !has_app_name {
+        conn.execute_batch("ALTER TABLE ignored_entries ADD COLUMN app_name TEXT;")?;
     }
     Ok(())
 }
@@ -326,6 +372,85 @@ pub fn remove_assignment(
         "DELETE FROM day_assignments
          WHERE date = ?1 AND app_key = ?2 AND title = ?3 AND project_id = ?4",
         rusqlite::params![date, app_key, title, project_id],
+    )?;
+    Ok(())
+}
+
+/// Remove every assignment connecting this app to the project, across all days
+/// and titles. Used by the project view's app-level remove action.
+pub fn remove_project_app_assignments(
+    conn: &Connection,
+    project_id: i64,
+    app_key: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM day_assignments WHERE project_id = ?1 AND app_key = ?2",
+        rusqlite::params![project_id, app_key],
+    )?;
+    Ok(())
+}
+
+/// Remove explicit title-level assignments connecting this title to the project.
+/// App-level assignments may still make the title inherit the project.
+pub fn remove_project_title_assignments(
+    conn: &Connection,
+    project_id: i64,
+    app_key: &str,
+    title: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM day_assignments
+         WHERE project_id = ?1 AND app_key = ?2 AND title = ?3",
+        rusqlite::params![project_id, app_key, title],
+    )?;
+    Ok(())
+}
+
+// ---- ignored entries ------------------------------------------------------
+
+/// Exclude an app/title from all activity totals. `title = ""` ignores the
+/// whole app; a non-empty title ignores only that title.
+pub fn add_ignored_entry(
+    conn: &Connection,
+    app_key: &str,
+    app_name: Option<&str>,
+    title: &str,
+) -> rusqlite::Result<()> {
+    let now = Local::now().timestamp();
+    conn.execute(
+        "INSERT INTO ignored_entries (app_key, app_name, title, created_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(app_key, title) DO UPDATE SET
+            app_name = COALESCE(excluded.app_name, ignored_entries.app_name)",
+        rusqlite::params![app_key, app_name, title, now],
+    )?;
+    Ok(())
+}
+
+pub fn list_ignored_entries(conn: &Connection) -> rusqlite::Result<Vec<IgnoredEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT app_key, app_name, title, created_at
+         FROM ignored_entries
+         ORDER BY created_at DESC, app_key ASC, title ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(IgnoredEntry {
+            app_key: r.get(0)?,
+            app_name: r.get(1)?,
+            title: r.get(2)?,
+            created_at: r.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn remove_ignored_entry(
+    conn: &Connection,
+    app_key: &str,
+    title: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM ignored_entries WHERE app_key = ?1 AND title = ?2",
+        rusqlite::params![app_key, title],
     )?;
     Ok(())
 }
@@ -478,6 +603,34 @@ impl Assignments {
     }
 }
 
+/// Global app/title ignore rules. An app-level rule (`title = ""`) hides every
+/// title for that app; a title-level rule hides only an exact title.
+struct Ignores {
+    by_key: HashSet<(String, String)>,
+}
+
+impl Ignores {
+    fn load(conn: &Connection) -> rusqlite::Result<Self> {
+        let mut stmt = conn.prepare("SELECT app_key, title FROM ignored_entries")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut by_key = HashSet::new();
+        for row in rows {
+            by_key.insert(row?);
+        }
+        Ok(Self { by_key })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.by_key.is_empty()
+    }
+
+    fn matches(&self, app_key: &str, title: &str) -> bool {
+        self.by_key
+            .contains(&(app_key.to_string(), String::new()))
+            || self.by_key.contains(&(app_key.to_string(), title.to_string()))
+    }
+}
+
 pub(crate) fn local_date_string(ts: i64) -> String {
     let dt = Local.timestamp_opt(ts, 0).single().expect("valid ts");
     format!("{:04}-{:02}-{:02}", dt.year(), dt.month(), dt.day())
@@ -498,6 +651,7 @@ pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
     let start = day_start_ts(date);
     let end = start + 86_400;
     let assigns = Assignments::load_day(conn, date)?;
+    let ignores = Ignores::load(conn)?;
 
     struct AppAcc {
         app_name: String,
@@ -512,11 +666,16 @@ pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
     let mut total = 0i64;
 
     for seg in read_segments(conn, Some((start, end)))? {
+        let key = seg.key();
+        let title = seg.title();
+        if ignores.matches(&key, &title) {
+            continue;
+        }
+
         let dur = seg.duration();
         total += dur;
 
-        let key = seg.key();
-        let entry = by_app.entry(key).or_insert_with(|| AppAcc {
+        let entry = by_app.entry(key.clone()).or_insert_with(|| AppAcc {
             app_name: seg.display_name(),
             bundle_id: seg.bundle_id.clone(),
             seconds: 0,
@@ -524,7 +683,7 @@ pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
             titles: HashMap::new(),
         });
         entry.seconds += dur;
-        *entry.titles.entry(seg.title()).or_insert(0) += dur;
+        *entry.titles.entry(title).or_insert(0) += dur;
 
         // Spread across hour buckets of this local day (cap overflow into hour 23).
         let mut t = seg.start_ts;
@@ -581,12 +740,16 @@ pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
 pub fn day_total_seconds(conn: &Connection, date: &str) -> rusqlite::Result<i64> {
     let start = day_start_ts(date);
     let end = start + 86_400;
-    conn.query_row(
-        "SELECT COALESCE(SUM(end_ts - start_ts), 0) FROM segments
-         WHERE start_ts >= ?1 AND start_ts < ?2",
-        rusqlite::params![start, end],
-        |r| r.get(0),
-    )
+    let ignores = Ignores::load(conn)?;
+    let mut total = 0;
+    for seg in read_segments(conn, Some((start, end)))? {
+        let key = seg.key();
+        let title = seg.title();
+        if !ignores.matches(&key, &title) {
+            total += seg.duration();
+        }
+    }
+    Ok(total)
 }
 
 /// Per-day totals for everything that resolves to `project_id` (newest day first).
@@ -596,11 +759,17 @@ pub fn project_breakdown(conn: &Connection, project_id: i64) -> rusqlite::Result
     if assigns.is_empty() {
         return Ok(vec![]);
     }
+    let ignores = Ignores::load(conn)?;
 
     let mut totals: HashMap<String, i64> = HashMap::new();
     for seg in read_segments(conn, None)? {
         let date = seg.local_date();
-        if assigns.resolve(&date, &seg.key(), &seg.title()).contains(&project_id) {
+        let key = seg.key();
+        let title = seg.title();
+        if ignores.matches(&key, &title) {
+            continue;
+        }
+        if assigns.resolve(&date, &key, &title).contains(&project_id) {
             *totals.entry(date).or_insert(0) += seg.duration();
         }
     }
@@ -613,37 +782,48 @@ pub fn project_breakdown(conn: &Connection, project_id: i64) -> rusqlite::Result
     Ok(out)
 }
 
-/// Which apps (and their titles) make up a project's total, with any notes attached.
+/// Per-day totals for ignored activity (newest day first).
+pub fn ignored_breakdown(conn: &Connection) -> rusqlite::Result<Vec<DayTotal>> {
+    let ignores = Ignores::load(conn)?;
+    if ignores.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut totals: HashMap<String, i64> = HashMap::new();
+    for seg in read_segments(conn, None)? {
+        let key = seg.key();
+        let title = seg.title();
+        if ignores.matches(&key, &title) {
+            *totals.entry(seg.local_date()).or_insert(0) += seg.duration();
+        }
+    }
+
+    let mut out: Vec<DayTotal> = totals
+        .into_iter()
+        .map(|(date, seconds)| DayTotal { date, seconds })
+        .collect();
+    out.sort_by(|a, b| b.date.cmp(&a.date));
+    Ok(out)
+}
+
+/// Which apps (and their titles) make up a project's total.
 /// Same per-segment resolution as the breakdown.
 pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<ProjectApp>> {
     let assigns = Assignments::load(conn)?;
     if assigns.is_empty() {
         return Ok(vec![]);
     }
-
-    // Notes for this project: (app_key, title) -> note.
-    let mut notes: HashMap<(String, String), String> = HashMap::new();
-    {
-        let mut stmt =
-            conn.prepare("SELECT app_key, title, note FROM entry_notes WHERE project_id = ?1")?;
-        let rows = stmt.query_map([project_id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (a, t, n) = row?;
-            notes.insert((a, t), n);
-        }
-    }
+    let ignores = Ignores::load(conn)?;
 
     struct AppAcc {
         name: String,
         bundle: Option<String>,
         seconds: i64,
-        titles: HashMap<String, i64>,
+        titles: HashMap<String, TitleAcc>,
+    }
+    struct TitleAcc {
+        seconds: i64,
+        can_remove: bool,
     }
     let mut by_app: HashMap<String, AppAcc> = HashMap::new();
 
@@ -651,9 +831,14 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
         let date = seg.local_date();
         let key = seg.key();
         let title = seg.title();
+        if ignores.matches(&key, &title) {
+            continue;
+        }
         if !assigns.resolve(&date, &key, &title).contains(&project_id) {
             continue;
         }
+        let can_remove =
+            !title.is_empty() && assigns.links(&date, &key, &title).contains(&project_id);
         let acc = by_app.entry(key).or_insert_with(|| AppAcc {
             name: seg.display_name(),
             bundle: seg.bundle_id.clone(),
@@ -661,7 +846,12 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
             titles: HashMap::new(),
         });
         acc.seconds += seg.duration();
-        *acc.titles.entry(title).or_insert(0) += seg.duration();
+        let title_acc = acc.titles.entry(title).or_insert(TitleAcc {
+            seconds: 0,
+            can_remove: false,
+        });
+        title_acc.seconds += seg.duration();
+        title_acc.can_remove |= can_remove;
     }
 
     let mut out: Vec<ProjectApp> = by_app
@@ -670,23 +860,14 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
             let mut titles: Vec<ProjectTitle> = acc
                 .titles
                 .into_iter()
-                .map(|(title, seconds)| {
-                    // Untitled rows aren't independently notable (key collides with app-level).
-                    let note = if title.is_empty() {
-                        None
-                    } else {
-                        notes.get(&(key.clone(), title.clone())).cloned()
-                    };
-                    ProjectTitle {
-                        title,
-                        seconds,
-                        note,
-                    }
+                .map(|(title, acc)| ProjectTitle {
+                    title,
+                    seconds: acc.seconds,
+                    can_remove: acc.can_remove,
                 })
                 .collect();
             titles.sort_by(|a, b| b.seconds.cmp(&a.seconds));
             ProjectApp {
-                note: notes.get(&(key.clone(), String::new())).cloned(),
                 app_key: key,
                 app_name: acc.name,
                 bundle_id: acc.bundle,
@@ -699,26 +880,53 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
     Ok(out)
 }
 
-/// Add, edit, or (with an empty note) clear the note on a project entry.
-/// `title = ""` is the app-level note.
-pub fn set_note(
+// ---- project period notes -------------------------------------------------
+
+pub fn list_project_period_notes(
     conn: &Connection,
     project_id: i64,
-    app_key: &str,
-    title: &str,
+) -> rusqlite::Result<Vec<ProjectPeriodNote>> {
+    let mut stmt = conn.prepare(
+        "SELECT granularity, period_key, note
+         FROM project_period_notes
+         WHERE project_id = ?1
+         ORDER BY granularity ASC, period_key DESC",
+    )?;
+    let rows = stmt.query_map([project_id], |r| {
+        Ok(ProjectPeriodNote {
+            granularity: r.get(0)?,
+            period_key: r.get(1)?,
+            note: r.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn set_project_period_note(
+    conn: &Connection,
+    project_id: i64,
+    granularity: &str,
+    period_key: &str,
     note: &str,
 ) -> rusqlite::Result<()> {
+    if !matches!(granularity, "day" | "week" | "month") {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+
     let trimmed = note.trim();
     if trimmed.is_empty() {
         conn.execute(
-            "DELETE FROM entry_notes WHERE project_id = ?1 AND app_key = ?2 AND title = ?3",
-            rusqlite::params![project_id, app_key, title],
+            "DELETE FROM project_period_notes
+             WHERE project_id = ?1 AND granularity = ?2 AND period_key = ?3",
+            rusqlite::params![project_id, granularity, period_key],
         )?;
     } else {
         conn.execute(
-            "INSERT INTO entry_notes (project_id, app_key, title, note) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(project_id, app_key, title) DO UPDATE SET note = excluded.note",
-            rusqlite::params![project_id, app_key, title, trimmed],
+            "INSERT INTO project_period_notes (project_id, granularity, period_key, note)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id, granularity, period_key)
+             DO UPDATE SET note = excluded.note",
+            rusqlite::params![project_id, granularity, period_key, trimmed],
         )?;
     }
     Ok(())
@@ -759,6 +967,54 @@ mod tests {
 
         assert_eq!(day_total_seconds(&conn, "2026-01-15").unwrap(), 90);
         assert_eq!(day_total_seconds(&conn, "2026-01-14").unwrap(), 40);
+    }
+
+    #[test]
+    fn day_total_excludes_ignored_apps() {
+        let conn = mem();
+        let d = "2026-03-10";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("com.apple.loginwindow"), Some("loginwindow"), None);
+        seg(&conn, s + 100, s + 160, Some("com.a"), Some("A"), None);
+        add_ignored_entry(&conn, "com.apple.loginwindow", Some("loginwindow"), "").unwrap();
+
+        assert_eq!(day_total_seconds(&conn, d).unwrap(), 60);
+    }
+
+    #[test]
+    fn ignored_entries_can_be_listed_and_removed() {
+        let conn = mem();
+        add_ignored_entry(&conn, "com.a", Some("App A"), "").unwrap();
+        add_ignored_entry(&conn, "com.b", Some("App B"), "noise").unwrap();
+
+        let entries = list_ignored_entries(&conn).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|e| {
+            e.app_key == "com.a" && e.app_name.as_deref() == Some("App A") && e.title.is_empty()
+        }));
+        assert!(entries.iter().any(|e| e.app_key == "com.b" && e.title == "noise"));
+
+        remove_ignored_entry(&conn, "com.b", "noise").unwrap();
+        let entries = list_ignored_entries(&conn).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].app_key, "com.a");
+    }
+
+    #[test]
+    fn ignored_breakdown_totals_matching_ignored_segments() {
+        let conn = mem();
+        let d = "2026-03-10";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("keep"));
+        seg(&conn, s + 100, s + 140, Some("com.a"), Some("A"), Some("noise"));
+        seg(&conn, s + 140, s + 200, Some("com.b"), Some("B"), None);
+        add_ignored_entry(&conn, "com.a", Some("A"), "noise").unwrap();
+        add_ignored_entry(&conn, "com.b", Some("B"), "").unwrap();
+
+        let rows = ignored_breakdown(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].date, d);
+        assert_eq!(rows[0].seconds, 100);
     }
 
     // ---- day_view ---------------------------------------------------------
@@ -804,6 +1060,26 @@ mod tests {
         assert_eq!(view.apps[0].app_key, "Finder");
         assert_eq!(view.apps[0].app_name, "Finder");
         assert_eq!(view.apps[0].bundle_id, None);
+    }
+
+    #[test]
+    fn day_view_excludes_ignored_app_and_title_rules() {
+        let conn = mem();
+        let d = "2026-03-10";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("com.apple.loginwindow"), Some("loginwindow"), None);
+        seg(&conn, s + 100, s + 170, Some("com.a"), Some("A"), Some("keep"));
+        seg(&conn, s + 170, s + 200, Some("com.a"), Some("A"), Some("noise"));
+        add_ignored_entry(&conn, "com.apple.loginwindow", Some("loginwindow"), "").unwrap();
+        add_ignored_entry(&conn, "com.a", Some("A"), "noise").unwrap();
+
+        let view = day_view(&conn, d).unwrap();
+        assert_eq!(view.total_seconds, 70);
+        assert_eq!(view.hours.iter().sum::<i64>(), 70);
+        assert_eq!(view.apps.len(), 1);
+        assert_eq!(view.apps[0].app_key, "com.a");
+        assert_eq!(view.apps[0].titles.len(), 1);
+        assert_eq!(view.apps[0].titles[0].title, "keep");
     }
 
     #[test]
@@ -898,10 +1174,26 @@ mod tests {
         assert_eq!(other_bd[0].seconds, 30); // only y
     }
 
+    #[test]
+    fn project_breakdown_excludes_ignored_entries() {
+        let conn = mem();
+        let work = create_project(&conn, "Work", "#fff").unwrap();
+        let d = "2026-03-10";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("keep"));
+        seg(&conn, s + 100, s + 150, Some("com.a"), Some("A"), Some("noise"));
+        add_assignment(&conn, d, "com.a", "", work.id).unwrap();
+        add_ignored_entry(&conn, "com.a", Some("A"), "noise").unwrap();
+
+        let bd = project_breakdown(&conn, work.id).unwrap();
+        assert_eq!(bd.len(), 1);
+        assert_eq!(bd[0].seconds, 100);
+    }
+
     // ---- project_apps -----------------------------------------------------
 
     #[test]
-    fn project_apps_groups_apps_and_titles_with_notes() {
+    fn project_apps_groups_apps_and_titles() {
         let conn = mem();
         let work = create_project(&conn, "Work", "#fff").unwrap();
         let d = "2026-03-10";
@@ -909,37 +1201,94 @@ mod tests {
         seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("x"));
         seg(&conn, s + 100, s + 150, Some("com.a"), Some("A"), Some("y"));
         add_assignment(&conn, d, "com.a", "", work.id).unwrap();
-        set_note(&conn, work.id, "com.a", "", "app note").unwrap();
-        set_note(&conn, work.id, "com.a", "x", "x note").unwrap();
 
         let apps = project_apps(&conn, work.id).unwrap();
         assert_eq!(apps.len(), 1);
         let app = &apps[0];
         assert_eq!(app.app_key, "com.a");
         assert_eq!(app.seconds, 150);
-        assert_eq!(app.note.as_deref(), Some("app note"));
         let tx = app.titles.iter().find(|t| t.title == "x").unwrap();
-        assert_eq!(tx.note.as_deref(), Some("x note"));
+        assert_eq!(tx.seconds, 100);
+        assert!(!tx.can_remove);
         let ty = app.titles.iter().find(|t| t.title == "y").unwrap();
-        assert_eq!(ty.note, None);
+        assert_eq!(ty.seconds, 50);
+        assert!(!ty.can_remove);
     }
 
     #[test]
-    fn project_apps_untitled_row_never_carries_app_level_note() {
+    fn project_apps_marks_explicit_title_rows_removable() {
+        let conn = mem();
+        let work = create_project(&conn, "Work", "#fff").unwrap();
+        let d = "2026-03-10";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("x"));
+        add_assignment(&conn, d, "com.a", "x", work.id).unwrap();
+
+        let apps = project_apps(&conn, work.id).unwrap();
+        let title = apps[0].titles.iter().find(|t| t.title == "x").unwrap();
+        assert!(title.can_remove);
+    }
+
+    #[test]
+    fn project_apps_keeps_untitled_title_row() {
         let conn = mem();
         let work = create_project(&conn, "Work", "#fff").unwrap();
         let d = "2026-03-10";
         let s = day_start_ts(d);
         seg(&conn, s, s + 100, Some("com.a"), Some("A"), None);
         add_assignment(&conn, d, "com.a", "", work.id).unwrap();
-        set_note(&conn, work.id, "com.a", "", "app note").unwrap();
 
         let apps = project_apps(&conn, work.id).unwrap();
         let app = &apps[0];
-        assert_eq!(app.note.as_deref(), Some("app note"));
         let untitled = app.titles.iter().find(|t| t.title.is_empty()).unwrap();
-        // The "" title row's key collides with the app-level note; it must stay None.
-        assert_eq!(untitled.note, None);
+        assert_eq!(untitled.seconds, 100);
+        assert!(!untitled.can_remove);
+    }
+
+    #[test]
+    fn project_apps_excludes_ignored_entries() {
+        let conn = mem();
+        let work = create_project(&conn, "Work", "#fff").unwrap();
+        let d = "2026-03-10";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("keep"));
+        seg(&conn, s + 100, s + 140, Some("com.a"), Some("A"), Some("noise"));
+        add_assignment(&conn, d, "com.a", "", work.id).unwrap();
+        add_ignored_entry(&conn, "com.a", Some("A"), "noise").unwrap();
+
+        let apps = project_apps(&conn, work.id).unwrap();
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].seconds, 100);
+        assert_eq!(apps[0].titles.len(), 1);
+        assert_eq!(apps[0].titles[0].title, "keep");
+    }
+
+    // ---- project_period_notes ---------------------------------------------
+
+    #[test]
+    fn project_period_notes_can_be_saved_listed_and_deleted() {
+        let conn = mem();
+        let work = create_project(&conn, "Work", "#fff").unwrap();
+        set_project_period_note(&conn, work.id, "day", "2026-03-10", "day note").unwrap();
+        set_project_period_note(&conn, work.id, "week", "2026-03-09", "week note").unwrap();
+        set_project_period_note(&conn, work.id, "month", "2026-03", "month note").unwrap();
+
+        let notes = list_project_period_notes(&conn, work.id).unwrap();
+        assert_eq!(notes.len(), 3);
+        assert!(notes.iter().any(|n| {
+            n.granularity == "day" && n.period_key == "2026-03-10" && n.note == "day note"
+        }));
+        assert!(notes.iter().any(|n| {
+            n.granularity == "week" && n.period_key == "2026-03-09" && n.note == "week note"
+        }));
+        assert!(notes.iter().any(|n| {
+            n.granularity == "month" && n.period_key == "2026-03" && n.note == "month note"
+        }));
+
+        set_project_period_note(&conn, work.id, "day", "2026-03-10", "").unwrap();
+        let notes = list_project_period_notes(&conn, work.id).unwrap();
+        assert_eq!(notes.len(), 2);
+        assert!(!notes.iter().any(|n| n.granularity == "day"));
     }
 
     // ---- Segment ----------------------------------------------------------
@@ -1069,6 +1418,42 @@ mod tests {
 
         let a = Assignments::load(&conn).unwrap();
         assert_eq!(a.links(d, "com.a", "x"), [p2.id]); // only p1's tag removed
+    }
+
+    #[test]
+    fn remove_project_app_assignments_clears_all_app_rows_for_project() {
+        let conn = mem();
+        let p1 = create_project(&conn, "P1", "#fff").unwrap();
+        let p2 = create_project(&conn, "P2", "#000").unwrap();
+        let d = "2026-03-10";
+        add_assignment(&conn, d, "com.a", "", p1.id).unwrap();
+        add_assignment(&conn, d, "com.a", "x", p1.id).unwrap();
+        add_assignment(&conn, d, "com.a", "x", p2.id).unwrap();
+        add_assignment(&conn, d, "com.b", "", p1.id).unwrap();
+
+        remove_project_app_assignments(&conn, p1.id, "com.a").unwrap();
+
+        let a = Assignments::load(&conn).unwrap();
+        assert!(a.links(d, "com.a", "").is_empty());
+        assert_eq!(a.links(d, "com.a", "x"), [p2.id]);
+        assert_eq!(a.links(d, "com.b", ""), [p1.id]);
+    }
+
+    #[test]
+    fn remove_project_title_assignments_clears_only_exact_title_rows() {
+        let conn = mem();
+        let p1 = create_project(&conn, "P1", "#fff").unwrap();
+        let p2 = create_project(&conn, "P2", "#000").unwrap();
+        let d = "2026-03-10";
+        add_assignment(&conn, d, "com.a", "", p1.id).unwrap();
+        add_assignment(&conn, d, "com.a", "x", p1.id).unwrap();
+        add_assignment(&conn, d, "com.a", "x", p2.id).unwrap();
+
+        remove_project_title_assignments(&conn, p1.id, "com.a", "x").unwrap();
+
+        let a = Assignments::load(&conn).unwrap();
+        assert_eq!(a.links(d, "com.a", ""), [p1.id]);
+        assert_eq!(a.links(d, "com.a", "x"), [p2.id]);
     }
 
     #[test]

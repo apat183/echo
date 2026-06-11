@@ -49,6 +49,24 @@ describe("mergeDayViews", () => {
     expect(app.projects).toEqual([{ id: 1, dates: ["2026-06-09", "2026-06-10"] }]);
     expect(app.hours[9]).toBe(100);
     expect(app.hours[10]).toBe(50);
+    expect(merged.timeline.map((b) => [b.key, b.seconds])).toEqual([
+      ["2026-06-08", 0],
+      ["2026-06-09", 100],
+      ["2026-06-10", 50],
+      ["2026-06-11", 0],
+      ["2026-06-12", 0],
+      ["2026-06-13", 0],
+      ["2026-06-14", 0],
+    ]);
+    expect(app.timeline.map((b) => [b.key, b.seconds])).toEqual([
+      ["2026-06-08", 0],
+      ["2026-06-09", 100],
+      ["2026-06-10", 50],
+      ["2026-06-11", 0],
+      ["2026-06-12", 0],
+      ["2026-06-13", 0],
+      ["2026-06-14", 0],
+    ]);
 
     expect(app.titles).toHaveLength(1);
     expect(app.titles[0]).toMatchObject({ title: "doc", seconds: 150 });

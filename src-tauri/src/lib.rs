@@ -4,7 +4,7 @@ mod poller;
 mod tracker;
 mod tray;
 
-use db::{DayTotal, DayView, Project, ProjectApp, DbState};
+use db::{DayTotal, DayView, DbState, IgnoredEntry, Project, ProjectApp, ProjectPeriodNote};
 use std::sync::{Arc, Mutex};
 use tracker::TrackerState;
 use tauri::{Manager, State};
@@ -67,6 +67,61 @@ fn remove_assignment(
     db::remove_assignment(&conn, &date, &app_key, &title, project_id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn remove_project_app_assignments(
+    state: State<'_, DbState>,
+    project_id: i64,
+    app_key: String,
+) -> Result<(), String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::remove_project_app_assignments(&conn, project_id, &app_key).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_project_title_assignments(
+    state: State<'_, DbState>,
+    project_id: i64,
+    app_key: String,
+    title: String,
+) -> Result<(), String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::remove_project_title_assignments(&conn, project_id, &app_key, &title)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_ignored_entry(
+    state: State<'_, DbState>,
+    app_key: String,
+    app_name: Option<String>,
+    title: String,
+) -> Result<(), String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::add_ignored_entry(&conn, &app_key, app_name.as_deref(), &title).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_ignored_entries(state: State<'_, DbState>) -> Result<Vec<IgnoredEntry>, String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::list_ignored_entries(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_ignored_entry(
+    state: State<'_, DbState>,
+    app_key: String,
+    title: String,
+) -> Result<(), String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::remove_ignored_entry(&conn, &app_key, &title).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn ignored_breakdown(state: State<'_, DbState>) -> Result<Vec<DayTotal>, String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::ignored_breakdown(&conn).map_err(|e| e.to_string())
+}
+
 /// Whether the app has macOS Accessibility permission (needed for window titles).
 #[tauri::command]
 fn ax_status() -> bool {
@@ -93,15 +148,25 @@ fn project_apps(state: State<'_, DbState>, project_id: i64) -> Result<Vec<Projec
 }
 
 #[tauri::command]
-fn set_note(
+fn list_project_period_notes(
     state: State<'_, DbState>,
     project_id: i64,
-    app_key: String,
-    title: String,
+) -> Result<Vec<ProjectPeriodNote>, String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::list_project_period_notes(&conn, project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_project_period_note(
+    state: State<'_, DbState>,
+    project_id: i64,
+    granularity: String,
+    period_key: String,
     note: String,
 ) -> Result<(), String> {
     let conn = state.lock().map_err(|e| e.to_string())?;
-    db::set_note(&conn, project_id, &app_key, &title, &note).map_err(|e| e.to_string())
+    db::set_project_period_note(&conn, project_id, &granularity, &period_key, &note)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -181,9 +246,16 @@ pub fn run() {
             set_project_order,
             add_assignment,
             remove_assignment,
+            remove_project_app_assignments,
+            remove_project_title_assignments,
+            add_ignored_entry,
+            list_ignored_entries,
+            remove_ignored_entry,
+            ignored_breakdown,
             project_breakdown,
             project_apps,
-            set_note,
+            list_project_period_notes,
+            set_project_period_note,
             app_icon_data_url,
             ax_status,
             ax_request,

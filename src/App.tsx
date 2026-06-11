@@ -4,6 +4,7 @@ import type { DragPayload } from "./drag";
 import { Sidebar, type Selection } from "./components/Sidebar";
 import { DayPane } from "./components/DayPane";
 import { ProjectPane } from "./components/ProjectPane";
+import { IgnoredPane } from "./components/IgnoredPane";
 import "./App.css";
 
 export default function App() {
@@ -11,6 +12,7 @@ export default function App() {
   const [selection, setSelection] = useState<Selection>({ kind: "day" });
   const [dragPayload, setDragPayload] = useState<DragPayload | null>(null);
   const [assignmentVersion, setAssignmentVersion] = useState(0);
+  const [ignoredVersion, setIgnoredVersion] = useState(0);
   const dragPayloadRef = useRef<DragPayload | null>(null);
 
   const refreshProjects = useCallback(async () => {
@@ -35,6 +37,23 @@ export default function App() {
     [refreshProjects]
   );
 
+  const ignoreActivity = useCallback(async (payload: DragPayload) => {
+    await api.addIgnoredEntry(payload.appKey, payload.appName, payload.title);
+    setAssignmentVersion((v) => v + 1);
+    setIgnoredVersion((v) => v + 1);
+    setSelection({ kind: "ignored" });
+  }, []);
+
+  const handleIgnoredChanged = useCallback(() => {
+    setAssignmentVersion((v) => v + 1);
+    setIgnoredVersion((v) => v + 1);
+  }, []);
+
+  const handleAssignmentChanged = useCallback(() => {
+    setAssignmentVersion((v) => v + 1);
+    refreshProjects();
+  }, [refreshProjects]);
+
   useEffect(() => {
     refreshProjects();
   }, [refreshProjects]);
@@ -49,6 +68,7 @@ export default function App() {
         dragPayload={dragPayload}
         getDragPayload={() => dragPayloadRef.current}
         onAssignApp={assignAppToProject}
+        onIgnoreApp={ignoreActivity}
       />
       <main className="main">
         {selection.kind === "day" ? (
@@ -56,11 +76,14 @@ export default function App() {
             projects={projects}
             assignmentVersion={assignmentVersion}
             onDragApp={handleDragApp}
-            onAssignmentChange={refreshProjects}
+            onAssignmentChange={handleAssignmentChanged}
           />
+        ) : selection.kind === "ignored" ? (
+          <IgnoredPane refreshKey={ignoredVersion} onChanged={handleIgnoredChanged} />
         ) : (
           <ProjectPane
             project={projects.find((p) => p.id === selection.id)}
+            onAssignmentChange={handleAssignmentChanged}
           />
         )}
       </main>

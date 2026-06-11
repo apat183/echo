@@ -1,33 +1,44 @@
-// Project view: a project's time auto-grouped by day/week/month, its app/title
-// breakdown, and per-entry notes. Read-only for time; assignment happens by
+// Project view: a project's time auto-grouped by day/week/month, with period
+// notes and an app/title breakdown. Read-only for time; assignment happens by
 // dragging in the day pane.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   api,
   appColor,
+  addDays,
   type DayTotal,
   fmtDur,
   initials,
+  monthKey,
   type Project,
   type ProjectApp,
+  type ProjectPeriodNote,
+  weekKey,
 } from "../api";
-import { rollup, type Granularity } from "../period";
+import { bucketLabel, rollup, type Bucket, type Granularity } from "../period";
 import { loadAppIcon } from "../appIcon";
-import { Calendar, CalendarDays, CalendarRange } from "lucide-react";
+import { Calendar, CalendarDays, CalendarRange, X } from "lucide-react";
 import { Segmented } from "./Segmented";
 
-export function ProjectPane(props: { project?: Project }) {
-  const { project } = props;
+export function ProjectPane(props: { project?: Project; onAssignmentChange: () => void }) {
+  const { project, onAssignmentChange } = props;
   const [rows, setRows] = useState<DayTotal[]>([]);
   const [apps, setApps] = useState<ProjectApp[]>([]);
+  const [notes, setNotes] = useState<ProjectPeriodNote[]>([]);
   const [gran, setGran] = useState<Granularity>("week");
 
   const projectId = project?.id;
-  const load = useCallback(() => {
+  const load = useCallback(async () => {
     if (projectId == null) return;
-    api.projectBreakdown(projectId).then(setRows);
-    api.projectApps(projectId).then(setApps);
+    const [nextRows, nextApps, nextNotes] = await Promise.all([
+      api.projectBreakdown(projectId),
+      api.projectApps(projectId),
+      api.listProjectPeriodNotes(projectId),
+    ]);
+    setRows(nextRows);
+    setApps(nextApps);
+    setNotes(nextNotes);
   }, [projectId]);
 
   useEffect(() => {
@@ -37,6 +48,34 @@ export function ProjectPane(props: { project?: Project }) {
   const buckets = useMemo(() => rollup(rows, gran), [rows, gran]);
   const total = useMemo(() => rows.reduce((s, r) => s + r.seconds, 0), [rows]);
   const appsMax = apps.length > 0 ? apps[0].seconds : 1;
+  const noteByKey = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const note of notes) {
+      map.set(noteKey(note.granularity, note.period_key), note.note);
+    }
+    return map;
+  }, [notes]);
+
+  async function savePeriodNote(noteGran: Granularity, key: string, text: string) {
+    if (projectId == null) return;
+    await api.setProjectPeriodNote(projectId, noteGran, key, text);
+    await api.listProjectPeriodNotes(projectId).then(setNotes);
+  }
+
+  async function removeProjectApp(app: ProjectApp) {
+    if (projectId == null) return;
+    if (!window.confirm(`Remove ${app.app_name} from this project?`)) return;
+    await api.removeProjectAppAssignments(projectId, app.app_key);
+    await load();
+    onAssignmentChange();
+  }
+
+  async function removeProjectTitle(app: ProjectApp, title: string) {
+    if (projectId == null) return;
+    await api.removeProjectTitleAssignments(projectId, app.app_key, title);
+    await load();
+    onAssignmentChange();
+  }
 
   if (!project) return <div className="pane-body" />;
 
@@ -75,8 +114,8 @@ export function ProjectPane(props: { project?: Project }) {
                 app={a}
                 color={project.color}
                 max={appsMax}
-                projectId={project.id}
-                onChanged={load}
+                onRemoveApp={removeProjectApp}
+                onRemoveTitle={(title) => removeProjectTitle(a, title)}
               />
             ))}
           </div>
@@ -90,19 +129,16 @@ export function ProjectPane(props: { project?: Project }) {
             </p>
           )}
           {buckets.map((b) => (
-            <div className="bucket-row" key={b.key}>
-              <span className="bucket-label">{b.label}</span>
-              <span className="bucket-bar-wrap">
-                <span
-                  className="bucket-bar"
-                  style={{
-                    width: `${(b.seconds / Math.max(1, buckets[0].seconds)) * 100}%`,
-                    background: project.color,
-                  }}
-                />
-              </span>
-              <span className="bucket-time">{fmtDur(b.seconds)}</span>
-            </div>
+            <PeriodBucketRow
+              key={b.key}
+              bucket={b}
+              gran={gran}
+              rows={rows}
+              maxSeconds={buckets[0].seconds}
+              color={project.color}
+              noteByKey={noteByKey}
+              onSaveNote={savePeriodNote}
+            />
           ))}
         </div>
       </div>
@@ -110,8 +146,20 @@ export function ProjectPane(props: { project?: Project }) {
   );
 }
 
-/** One editable note on a project entry (app or title). Empty saves clear it. */
-function EntryNote(props: { note: string | null; onSave: (text: string) => void }) {
+function noteKey(gran: Granularity, key: string): string {
+  return `${gran}:${key}`;
+}
+
+function noteFor(map: Map<string, string>, gran: Granularity, key: string): string | null {
+  return map.get(noteKey(gran, key)) ?? null;
+}
+
+/** One editable note attached to a day/week/month bucket. Empty saves clear it. */
+function PeriodNote(props: {
+  note: string | null;
+  placeholder: string;
+  onSave: (text: string) => void;
+}) {
   const { note, onSave } = props;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(note ?? "");
@@ -123,11 +171,11 @@ function EntryNote(props: { note: string | null; onSave: (text: string) => void 
   if (editing) {
     return (
       <textarea
-        className="entry-note-input"
+        className="period-note-input"
         autoFocus
         rows={2}
         value={draft}
-        placeholder="Add a note…"
+        placeholder={props.placeholder}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => {
           setEditing(false);
@@ -146,26 +194,147 @@ function EntryNote(props: { note: string | null; onSave: (text: string) => void 
   }
   if (note) {
     return (
-      <div className="entry-note" title="Click to edit" onClick={() => setEditing(true)}>
+      <div className="period-note" title="Click to edit" onClick={() => setEditing(true)}>
         {note}
       </div>
     );
   }
   return (
-    <button type="button" className="entry-note-add" onClick={() => setEditing(true)}>
+    <button type="button" className="period-note-add" onClick={() => setEditing(true)}>
       + note
     </button>
   );
+}
+
+function PeriodBucketRow(props: {
+  bucket: Bucket;
+  gran: Granularity;
+  rows: DayTotal[];
+  maxSeconds: number;
+  color: string;
+  noteByKey: Map<string, string>;
+  onSaveNote: (gran: Granularity, key: string, text: string) => void;
+}) {
+  const { bucket, gran, rows, maxSeconds, color, noteByKey, onSaveNote } = props;
+  const [expanded, setExpanded] = useState(false);
+  const children = useMemo(
+    () => childNoteRows(bucket.key, gran, rows, noteByKey),
+    [bucket.key, gran, rows, noteByKey]
+  );
+  const hasChildren = children.length > 0;
+
+  return (
+    <div className="period-bucket">
+      <div className="bucket-row">
+        <button
+          type="button"
+          className={`disclosure ${hasChildren ? "" : "empty"}`}
+          tabIndex={hasChildren ? 0 : -1}
+          aria-label={expanded ? "Collapse notes" : "Expand notes"}
+          onClick={() => hasChildren && setExpanded((v) => !v)}
+        >
+          {hasChildren ? (expanded ? "▾" : "▸") : ""}
+        </button>
+        <span className="bucket-label">{bucket.label}</span>
+        <span className="bucket-bar-wrap">
+          <span
+            className="bucket-bar"
+            style={{
+              width: `${(bucket.seconds / Math.max(1, maxSeconds)) * 100}%`,
+              background: color,
+            }}
+          />
+        </span>
+        <span className="bucket-time">{fmtDur(bucket.seconds)}</span>
+      </div>
+
+      <div className="period-note-wrap">
+        <PeriodNote
+          note={noteFor(noteByKey, gran, bucket.key)}
+          placeholder={`Add ${gran} note...`}
+          onSave={(text) => onSaveNote(gran, bucket.key, text)}
+        />
+      </div>
+
+      {expanded && (
+        <div className="period-child-list">
+          {children.map((child) => (
+            <div className="period-child-row" key={`${child.gran}:${child.key}`}>
+              <span className="period-child-label">{child.label}</span>
+              <span className="period-child-time">
+                {child.seconds > 0 ? fmtDur(child.seconds) : ""}
+              </span>
+              <div className="period-child-note">
+                <PeriodNote
+                  note={noteFor(noteByKey, child.gran, child.key)}
+                  placeholder={`Add ${child.gran} note...`}
+                  onSave={(text) => onSaveNote(child.gran, child.key, text)}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function childNoteRows(
+  parentKey: string,
+  parentGran: Granularity,
+  rows: DayTotal[],
+  noteByKey: Map<string, string>,
+): Array<{ gran: Granularity; key: string; label: string; seconds: number }> {
+  if (parentGran === "day") return [];
+
+  const childGran: Granularity = parentGran === "week" ? "day" : "week";
+  const secondsByKey = new Map<string, number>();
+  for (const row of rows) {
+    if (parentGran === "week" && weekKey(row.date) === parentKey) {
+      secondsByKey.set(row.date, (secondsByKey.get(row.date) ?? 0) + row.seconds);
+    }
+    if (parentGran === "month" && monthKey(row.date) === parentKey) {
+      const key = weekKey(row.date);
+      secondsByKey.set(key, (secondsByKey.get(key) ?? 0) + row.seconds);
+    }
+  }
+
+  for (const key of noteByKey.keys()) {
+    const [gran, periodKey] = key.split(":", 2) as [Granularity, string];
+    if (gran !== childGran) continue;
+    if (parentGran === "week" && weekKey(periodKey) === parentKey) {
+      secondsByKey.set(periodKey, secondsByKey.get(periodKey) ?? 0);
+    }
+    if (parentGran === "month" && weekOverlapsMonth(periodKey, parentKey)) {
+      secondsByKey.set(periodKey, secondsByKey.get(periodKey) ?? 0);
+    }
+  }
+
+  return [...secondsByKey.entries()]
+    .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+    .map(([key, seconds]) => ({
+      gran: childGran,
+      key,
+      label: bucketLabel(key, childGran),
+      seconds,
+    }));
+}
+
+function weekOverlapsMonth(weekStart: string, month: string): boolean {
+  for (let i = 0; i < 7; i++) {
+    if (monthKey(addDays(weekStart, i)) === month) return true;
+  }
+  return false;
 }
 
 function ProjectAppRow(props: {
   app: ProjectApp;
   color: string;
   max: number;
-  projectId: number;
-  onChanged: () => void;
+  onRemoveApp: (app: ProjectApp) => void;
+  onRemoveTitle: (title: string) => void;
 }) {
-  const { app, color, max, projectId, onChanged } = props;
+  const { app, color, max, onRemoveApp, onRemoveTitle } = props;
   const [icon, setIcon] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
 
@@ -180,11 +349,6 @@ function ProjectAppRow(props: {
   }, [app.bundle_id]);
 
   const canExpand = app.titles.some((t) => t.title.trim() !== "");
-
-  async function saveNote(title: string, text: string) {
-    await api.setNote(projectId, app.app_key, title, text);
-    onChanged();
-  }
 
   return (
     <div className="project-app-group">
@@ -216,10 +380,14 @@ function ProjectAppRow(props: {
           />
         </span>
         <span className="bucket-time">{fmtDur(app.seconds)}</span>
-      </div>
-
-      <div className="entry-note-wrap">
-        <EntryNote note={app.note} onSave={(text) => saveNote("", text)} />
+        <button
+          type="button"
+          className="icon-btn project-row-remove"
+          title={`Remove ${app.app_name} from project`}
+          onClick={() => onRemoveApp(app)}
+        >
+          <X size={14} />
+        </button>
       </div>
 
       {expanded && (
@@ -231,12 +399,17 @@ function ProjectAppRow(props: {
                 <div className="project-title-row">
                   <span className="title-name">{isUntitled ? "Untitled" : t.title}</span>
                   <span className="title-time">{fmtDur(t.seconds)}</span>
+                  {t.can_remove && (
+                    <button
+                      type="button"
+                      className="icon-btn project-row-remove"
+                      title="Remove title from project"
+                      onClick={() => onRemoveTitle(t.title)}
+                    >
+                      <X size={13} />
+                    </button>
+                  )}
                 </div>
-                {!isUntitled && (
-                  <div className="entry-note-wrap title">
-                    <EntryNote note={t.note} onSave={(text) => saveNote(t.title, text)} />
-                  </div>
-                )}
               </div>
             );
           })}

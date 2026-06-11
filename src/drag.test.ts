@@ -14,14 +14,24 @@ function transfer(data: Record<string, string>): DataTransfer {
 
 describe("parseDragPayload", () => {
   it("decodes a valid payload from the echo mime type", () => {
-    const payload: DragPayload = { appKey: "com.a", title: "doc", dates: ["2026-06-10"] };
+    const payload: DragPayload = {
+      appKey: "com.a",
+      appName: "App A",
+      title: "doc",
+      dates: ["2026-06-10"],
+    };
     expect(parseDragPayload(transfer({ "application/x-echo-app": JSON.stringify(payload) }))).toEqual(
       payload
     );
   });
 
   it("falls back to the x-app mime type", () => {
-    const payload: DragPayload = { appKey: "com.a", title: "", dates: ["2026-06-10"] };
+    const payload: DragPayload = {
+      appKey: "com.a",
+      appName: "App A",
+      title: "",
+      dates: ["2026-06-10"],
+    };
     expect(parseDragPayload(transfer({ "application/x-app": JSON.stringify(payload) }))).toEqual(
       payload
     );
@@ -42,7 +52,12 @@ describe("parseDragPayload", () => {
     const t = transfer({
       "application/x-echo-app": JSON.stringify({ appKey: "com.a", dates: ["2026-06-10", 5, null] }),
     });
-    expect(parseDragPayload(t)).toEqual({ appKey: "com.a", title: "", dates: ["2026-06-10"] });
+    expect(parseDragPayload(t)).toEqual({
+      appKey: "com.a",
+      appName: "com.a",
+      title: "",
+      dates: ["2026-06-10"],
+    });
   });
 });
 

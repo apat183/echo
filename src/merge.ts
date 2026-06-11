@@ -3,9 +3,24 @@
 // days each project link covers preserved (so a dot can unassign just its days).
 
 import type { AppUsage, DayView } from "./api";
-import { addHours, emptyHours, periodLabel, type Granularity } from "./period";
+import {
+  addHours,
+  emptyHours,
+  labelHour,
+  periodFrameDates,
+  periodLabel,
+  prettyDate,
+  type Granularity,
+} from "./period";
 
 export type RowProject = { id: number; dates: string[] };
+
+export type PeriodChartBucket = {
+  key: string;
+  label: string;
+  axisLabel: string;
+  seconds: number;
+};
 
 export type PeriodTitleUsage = {
   title: string;
@@ -15,6 +30,7 @@ export type PeriodTitleUsage = {
 };
 
 export type PeriodAppUsage = Omit<AppUsage, "project_ids" | "titles"> & {
+  timeline: PeriodChartBucket[];
   dates: string[];
   projects: RowProject[]; // app-level (title="") links across the period
   titles: PeriodTitleUsage[];
@@ -25,6 +41,7 @@ export type PeriodView = {
   total_seconds: number;
   apps: PeriodAppUsage[];
   hours: number[];
+  timeline: PeriodChartBucket[];
 };
 
 export function mergeDayViews(
@@ -41,15 +58,18 @@ export function mergeDayViews(
     hours: number[];
     dates: string[];
     datesByProject: Map<number, string[]>; // app-level links
+    secondsByDate: Map<string, number>;
     titles: Map<string, TitleAcc>;
   };
 
   const byApp = new Map<string, Accumulator>();
   const hours = emptyHours();
+  const secondsByDate = new Map<string, number>();
   let total = 0;
 
   for (const day of days) {
     total += day.total_seconds;
+    secondsByDate.set(day.date, (secondsByDate.get(day.date) ?? 0) + day.total_seconds);
     addHours(hours, day.hours);
 
     for (const app of day.apps) {
@@ -63,12 +83,14 @@ export function mergeDayViews(
           hours: emptyHours(),
           dates: [],
           datesByProject: new Map<number, string[]>(),
+          secondsByDate: new Map<string, number>(),
           titles: new Map<string, TitleAcc>(),
         } satisfies Accumulator);
 
       entry.seconds += app.seconds;
       addHours(entry.hours, app.hours);
       entry.dates.push(day.date);
+      entry.secondsByDate.set(day.date, (entry.secondsByDate.get(day.date) ?? 0) + app.seconds);
       for (const pid of app.project_ids) pushDate(entry.datesByProject, pid, day.date);
 
       for (const t of app.titles) {
@@ -92,6 +114,7 @@ export function mergeDayViews(
       bundle_id: app.bundle_id,
       seconds: app.seconds,
       hours: app.hours,
+      timeline: buildTimeline(gran, anchorDate, app.hours, app.secondsByDate),
       dates: [...new Set(app.dates)].sort(),
       projects: rowProjects(app.datesByProject),
       titles: [...app.titles.entries()]
@@ -110,7 +133,36 @@ export function mergeDayViews(
     total_seconds: total,
     apps,
     hours,
+    timeline: buildTimeline(gran, anchorDate, hours, secondsByDate),
   };
+}
+
+function buildTimeline(
+  gran: Granularity,
+  anchorDate: string,
+  hours: number[],
+  secondsByDate: Map<string, number>,
+): PeriodChartBucket[] {
+  if (gran === "day") {
+    return hours.map((seconds, hour) => ({
+      key: String(hour),
+      label: labelHour(hour),
+      axisLabel: labelHour(hour),
+      seconds,
+    }));
+  }
+
+  return periodFrameDates(anchorDate, gran).map((date) => ({
+    key: date,
+    label: prettyDate(date),
+    axisLabel: gran === "week" ? weekdayLabel(date) : String(Number(date.slice(8, 10))),
+    seconds: secondsByDate.get(date) ?? 0,
+  }));
+}
+
+function weekdayLabel(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString([], { weekday: "short" });
 }
 
 function pushDate(map: Map<number, string[]>, id: number, date: string) {
