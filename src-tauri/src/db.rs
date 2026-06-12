@@ -42,12 +42,12 @@ pub struct TitleUsage {
 /// One app's total time within a day, broken down by window title.
 #[derive(Debug, Serialize)]
 pub struct AppUsage {
-    pub app_key: String, // bundle id, else name — the stable assignment key
+    pub app_key: String,  // bundle id, else name — the stable assignment key
     pub app_name: String, // display name
     pub bundle_id: Option<String>,
     pub seconds: i64,
-    pub hours: Vec<i64>,        // 24 buckets, seconds per hour of the local day
-    pub project_ids: Vec<i64>,  // app-level (title = "") tags; empty = unassigned
+    pub hours: Vec<i64>,       // 24 buckets, seconds per hour of the local day
+    pub project_ids: Vec<i64>, // app-level (title = "") tags; empty = unassigned
     pub titles: Vec<TitleUsage>,
 }
 
@@ -197,9 +197,7 @@ fn migrate_assignments_multi(conn: &Connection) -> rusqlite::Result<()> {
     let mut project_id_in_pk = false;
     {
         let mut stmt = conn.prepare("PRAGMA table_info(day_assignments)")?;
-        let cols = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)?))
-        })?;
+        let cols = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)?)))?;
         for c in cols {
             let (name, pk) = c?;
             if name == "project_id" && pk != 0 {
@@ -443,11 +441,7 @@ pub fn list_ignored_entries(conn: &Connection) -> rusqlite::Result<Vec<IgnoredEn
     rows.collect()
 }
 
-pub fn remove_ignored_entry(
-    conn: &Connection,
-    app_key: &str,
-    title: &str,
-) -> rusqlite::Result<()> {
+pub fn remove_ignored_entry(conn: &Connection, app_key: &str, title: &str) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM ignored_entries WHERE app_key = ?1 AND title = ?2",
         rusqlite::params![app_key, title],
@@ -551,8 +545,9 @@ impl Assignments {
 
     /// Just one day's assignments — the day view only needs the one date.
     fn load_day(conn: &Connection, date: &str) -> rusqlite::Result<Self> {
-        let mut stmt = conn
-            .prepare("SELECT date, app_key, title, project_id FROM day_assignments WHERE date = ?1")?;
+        let mut stmt = conn.prepare(
+            "SELECT date, app_key, title, project_id FROM day_assignments WHERE date = ?1",
+        )?;
         let rows = stmt.query_map([date], Self::row)?;
         Self::collect(rows)
     }
@@ -568,7 +563,10 @@ impl Assignments {
         let mut by_key: HashMap<(String, String, String), Vec<i64>> = HashMap::new();
         for row in rows {
             let (date, app_key, title, project_id) = row?;
-            by_key.entry((date, app_key, title)).or_default().push(project_id);
+            by_key
+                .entry((date, app_key, title))
+                .or_default()
+                .push(project_id);
         }
         // Deterministic order regardless of row arrival order.
         for ids in by_key.values_mut() {
@@ -625,9 +623,10 @@ impl Ignores {
     }
 
     fn matches(&self, app_key: &str, title: &str) -> bool {
-        self.by_key
-            .contains(&(app_key.to_string(), String::new()))
-            || self.by_key.contains(&(app_key.to_string(), title.to_string()))
+        self.by_key.contains(&(app_key.to_string(), String::new()))
+            || self
+                .by_key
+                .contains(&(app_key.to_string(), title.to_string()))
     }
 }
 
@@ -713,7 +712,7 @@ pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
                     seconds,
                 })
                 .collect();
-            titles.sort_by(|a, b| b.seconds.cmp(&a.seconds));
+            titles.sort_by_key(|title| std::cmp::Reverse(title.seconds));
             AppUsage {
                 project_ids: assigns.links(date, &key, "").to_vec(),
                 app_key: key,
@@ -725,7 +724,7 @@ pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
             }
         })
         .collect();
-    apps.sort_by(|a, b| b.seconds.cmp(&a.seconds));
+    apps.sort_by_key(|app| std::cmp::Reverse(app.seconds));
 
     Ok(DayView {
         date: date.to_string(),
@@ -866,7 +865,7 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
                     can_remove: acc.can_remove,
                 })
                 .collect();
-            titles.sort_by(|a, b| b.seconds.cmp(&a.seconds));
+            titles.sort_by_key(|title| std::cmp::Reverse(title.seconds));
             ProjectApp {
                 app_key: key,
                 app_name: acc.name,
@@ -876,7 +875,7 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
             }
         })
         .collect();
-    out.sort_by(|a, b| b.seconds.cmp(&a.seconds));
+    out.sort_by_key(|app| std::cmp::Reverse(app.seconds));
     Ok(out)
 }
 
@@ -963,7 +962,15 @@ mod tests {
         insert_segment(&conn, start + 200, start + 230, None, Some("B"), None).unwrap();
         // previous day and next day: excluded
         insert_segment(&conn, start - 50, start - 10, None, Some("A"), None).unwrap();
-        insert_segment(&conn, start + 86_400 + 5, start + 86_400 + 25, None, Some("A"), None).unwrap();
+        insert_segment(
+            &conn,
+            start + 86_400 + 5,
+            start + 86_400 + 25,
+            None,
+            Some("A"),
+            None,
+        )
+        .unwrap();
 
         assert_eq!(day_total_seconds(&conn, "2026-01-15").unwrap(), 90);
         assert_eq!(day_total_seconds(&conn, "2026-01-14").unwrap(), 40);
@@ -974,7 +981,14 @@ mod tests {
         let conn = mem();
         let d = "2026-03-10";
         let s = day_start_ts(d);
-        seg(&conn, s, s + 100, Some("com.apple.loginwindow"), Some("loginwindow"), None);
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.apple.loginwindow"),
+            Some("loginwindow"),
+            None,
+        );
         seg(&conn, s + 100, s + 160, Some("com.a"), Some("A"), None);
         add_ignored_entry(&conn, "com.apple.loginwindow", Some("loginwindow"), "").unwrap();
 
@@ -992,7 +1006,9 @@ mod tests {
         assert!(entries.iter().any(|e| {
             e.app_key == "com.a" && e.app_name.as_deref() == Some("App A") && e.title.is_empty()
         }));
-        assert!(entries.iter().any(|e| e.app_key == "com.b" && e.title == "noise"));
+        assert!(entries
+            .iter()
+            .any(|e| e.app_key == "com.b" && e.title == "noise"));
 
         remove_ignored_entry(&conn, "com.b", "noise").unwrap();
         let entries = list_ignored_entries(&conn).unwrap();
@@ -1006,7 +1022,14 @@ mod tests {
         let d = "2026-03-10";
         let s = day_start_ts(d);
         seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("keep"));
-        seg(&conn, s + 100, s + 140, Some("com.a"), Some("A"), Some("noise"));
+        seg(
+            &conn,
+            s + 100,
+            s + 140,
+            Some("com.a"),
+            Some("A"),
+            Some("noise"),
+        );
         seg(&conn, s + 140, s + 200, Some("com.b"), Some("B"), None);
         add_ignored_entry(&conn, "com.a", Some("A"), "noise").unwrap();
         add_ignored_entry(&conn, "com.b", Some("B"), "").unwrap();
@@ -1025,7 +1048,14 @@ mod tests {
         let d = "2026-03-10";
         let s = day_start_ts(d);
         seg(&conn, s, s + 100, Some("com.a"), Some("AppA"), Some("x"));
-        seg(&conn, s + 100, s + 300, Some("com.a"), Some("AppA"), Some("y"));
+        seg(
+            &conn,
+            s + 100,
+            s + 300,
+            Some("com.a"),
+            Some("AppA"),
+            Some("y"),
+        );
         seg(&conn, s + 300, s + 350, Some("com.b"), Some("AppB"), None);
 
         let view = day_view(&conn, d).unwrap();
@@ -1067,9 +1097,30 @@ mod tests {
         let conn = mem();
         let d = "2026-03-10";
         let s = day_start_ts(d);
-        seg(&conn, s, s + 100, Some("com.apple.loginwindow"), Some("loginwindow"), None);
-        seg(&conn, s + 100, s + 170, Some("com.a"), Some("A"), Some("keep"));
-        seg(&conn, s + 170, s + 200, Some("com.a"), Some("A"), Some("noise"));
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.apple.loginwindow"),
+            Some("loginwindow"),
+            None,
+        );
+        seg(
+            &conn,
+            s + 100,
+            s + 170,
+            Some("com.a"),
+            Some("A"),
+            Some("keep"),
+        );
+        seg(
+            &conn,
+            s + 170,
+            s + 200,
+            Some("com.a"),
+            Some("A"),
+            Some("noise"),
+        );
         add_ignored_entry(&conn, "com.apple.loginwindow", Some("loginwindow"), "").unwrap();
         add_ignored_entry(&conn, "com.a", Some("A"), "noise").unwrap();
 
@@ -1137,11 +1188,25 @@ mod tests {
         let (s1, s2) = (day_start_ts(d1), day_start_ts(d2));
         // Day 1: two titles, only an app-level assignment -> both count.
         seg(&conn, s1, s1 + 100, Some("com.a"), Some("A"), Some("x"));
-        seg(&conn, s1 + 100, s1 + 150, Some("com.a"), Some("A"), Some("y"));
+        seg(
+            &conn,
+            s1 + 100,
+            s1 + 150,
+            Some("com.a"),
+            Some("A"),
+            Some("y"),
+        );
         add_assignment(&conn, d1, "com.a", "", work.id).unwrap();
         // Day 2: only a title-level assignment on x -> only x counts.
         seg(&conn, s2, s2 + 200, Some("com.a"), Some("A"), Some("x"));
-        seg(&conn, s2 + 200, s2 + 260, Some("com.a"), Some("A"), Some("y"));
+        seg(
+            &conn,
+            s2 + 200,
+            s2 + 260,
+            Some("com.a"),
+            Some("A"),
+            Some("y"),
+        );
         add_assignment(&conn, d2, "com.a", "x", work.id).unwrap();
 
         let bd = project_breakdown(&conn, work.id).unwrap();
@@ -1181,7 +1246,14 @@ mod tests {
         let d = "2026-03-10";
         let s = day_start_ts(d);
         seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("keep"));
-        seg(&conn, s + 100, s + 150, Some("com.a"), Some("A"), Some("noise"));
+        seg(
+            &conn,
+            s + 100,
+            s + 150,
+            Some("com.a"),
+            Some("A"),
+            Some("noise"),
+        );
         add_assignment(&conn, d, "com.a", "", work.id).unwrap();
         add_ignored_entry(&conn, "com.a", Some("A"), "noise").unwrap();
 
@@ -1252,7 +1324,14 @@ mod tests {
         let d = "2026-03-10";
         let s = day_start_ts(d);
         seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("keep"));
-        seg(&conn, s + 100, s + 140, Some("com.a"), Some("A"), Some("noise"));
+        seg(
+            &conn,
+            s + 100,
+            s + 140,
+            Some("com.a"),
+            Some("A"),
+            Some("noise"),
+        );
         add_assignment(&conn, d, "com.a", "", work.id).unwrap();
         add_ignored_entry(&conn, "com.a", Some("A"), "noise").unwrap();
 
@@ -1318,16 +1397,27 @@ mod tests {
 
     #[test]
     fn segment_duration_is_clamped_non_negative() {
-        let s = Segment { start_ts: 100, end_ts: 130, ..segment(None, None) };
+        let s = Segment {
+            start_ts: 100,
+            end_ts: 130,
+            ..segment(None, None)
+        };
         assert_eq!(s.duration(), 30);
-        let backwards = Segment { start_ts: 130, end_ts: 100, ..segment(None, None) };
+        let backwards = Segment {
+            start_ts: 130,
+            end_ts: 100,
+            ..segment(None, None)
+        };
         assert_eq!(backwards.duration(), 0);
     }
 
     #[test]
     fn segment_title_defaults_to_empty_string() {
         assert_eq!(segment(None, None).title(), "");
-        let titled = Segment { title: Some("doc".into()), ..segment(None, None) };
+        let titled = Segment {
+            title: Some("doc".into()),
+            ..segment(None, None)
+        };
         assert_eq!(titled.title(), "doc");
     }
 

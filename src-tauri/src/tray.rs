@@ -36,7 +36,14 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
     let sep2 = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
         app,
-        &[&today_item, &sep1, &pause_item, &open_item, &sep2, &quit_item],
+        &[
+            &today_item,
+            &sep1,
+            &pause_item,
+            &open_item,
+            &sep2,
+            &quit_item,
+        ],
     )?;
 
     let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/trayTemplate.png"))
@@ -79,7 +86,7 @@ fn toggle_pause(app: &AppHandle) {
     if now_paused {
         // Close the in-progress segment right now so paused time is unbilled.
         let db = app.state::<DbState>();
-        track.close_current(&*db, chrono::Utc::now().timestamp());
+        track.close_current(&db, chrono::Utc::now().timestamp());
         let _ = handles.pause_item.set_text("Resume time tracking");
         let _ = handles.tray.set_tooltip(Some("Echo - paused"));
     } else {
@@ -117,9 +124,7 @@ pub fn refresh_today(app: &AppHandle, total_seconds: i64, paused: bool) {
         *last = today.clone();
         let _ = handles.today_item.set_text(&today);
         if !paused {
-            let _ = handles
-                .tray
-                .set_tooltip(Some(format!("Echo - {today}")));
+            let _ = handles.tray.set_tooltip(Some(format!("Echo - {today}")));
         }
     }
 }
