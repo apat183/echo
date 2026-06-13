@@ -1038,7 +1038,7 @@ body {
 .period-child-row {
   display: grid;
   grid-template-columns: minmax(120px, 170px) 62px minmax(0, 1fr);
-  align-items: center;
+  align-items: baseline;
   gap: 10px;
   padding: 5px 8px;
   border-radius: 6px;
@@ -1068,6 +1068,7 @@ body {
 
 .period-child-note {
   min-width: 0;
+  align-self: baseline;
 }
 
 .period-child-note .period-note,

@@ -9,15 +9,21 @@ open Echo, scan the day or week, drag apps or window titles into projects, and u
 the project view to understand where the time went. It is not built for teams,
 timesheets, billing, clients, rates, or invoices.
 
+![Echo activity chart](assets/readme/activity-chart.png)
+
 ## Features
 
 - Menu-bar tracking with pause, resume, open, and quit controls.
 - Local app and window-title capture on macOS.
-- Day, week, and month activity views.
+- Day, week, and month activity charts with per-app breakdowns.
 - Per-project totals and app/title breakdowns.
 - Drag app or title rows onto projects to assign time.
-- Entry notes for project activity.
+- Ignore noisy apps or window titles and restore them later.
+- Day, week, and month project notes. Week views group day notes; month views
+  group week notes.
 - Local SQLite storage owned by the app.
+
+![Echo project notes](assets/readme/project-notes.png)
 
 ## Privacy
 
@@ -39,6 +45,16 @@ rough edges, schema changes, and macOS-first assumptions.
 - Rust
 - Tauri prerequisites for macOS, including Xcode Command Line Tools
 
+## Install
+
+Echo is currently distributed as a private, unsigned macOS build. Download the
+latest DMG from GitHub Releases, drag Echo into Applications, then open it from
+Finder.
+
+Because the build is unsigned, macOS may require manual approval in System
+Settings before first launch. For a public release, Echo should be Developer ID
+signed and notarized.
+
 ## Development
 
 Install dependencies:
@@ -59,25 +75,45 @@ Build the frontend:
 bun run build
 ```
 
-Run Rust tests:
-
-```sh
-cd src-tauri
-cargo test
-```
-
 Run frontend tests:
 
 ```sh
 bun run test
 ```
 
+Run frontend coverage:
+
+```sh
+bun run test:coverage
+```
+
+Run Rust checks:
+
+```sh
+cd src-tauri
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+Build a local macOS DMG:
+
+```sh
+bun run tauri build --bundles dmg
+```
+
 ## Repository Layout
 
 - `src/` - React UI.
 - `src-tauri/` - Rust shell, tracker, SQLite storage, tray integration, and macOS capture.
+- `.github/workflows/` - CI and draft-release automation.
+
+## Release
+
+See `RELEASE.md` for the private unsigned release checklist. The GitHub Actions
+release workflow runs on `v*` tags or manual dispatch and creates a draft release
+with macOS DMG artifacts.
 
 ## License
 
-No license has been added yet. Add one before accepting external contributions or
-publishing this as an open-source project.
+MIT. See `LICENSE`.

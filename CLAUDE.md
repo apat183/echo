@@ -21,11 +21,12 @@ cd src-tauri && cargo test paused     # single test / filter by name substring
 cd src-tauri && cargo build           # compile Rust without running
 
 bun run test                # frontend unit tests (Vitest)
+bun run test:coverage       # frontend coverage report
 bun run test period         # single frontend file / filter by name substring
 bun run mask.js             # regenerate app + tray icons from app-icon.png (needs `tauri icon`)
 ```
 
-Two test suites. **Rust** unit tests live in `#[cfg(test)]` modules (`poller.rs`, `tracker.rs`, `db.rs`) and cover the tracking state machine and the SQLite aggregation/resolution logic. **Frontend** tests (Vitest) cover the pure logic only — `*.test.ts` next to `api.ts`, `period.ts`, `merge.ts`, `drag.ts`; React components are not tested. There is no linter; typechecking happens via `tsc` inside `bun run build`.
+Two test suites. **Rust** unit tests live in `#[cfg(test)]` modules (`poller.rs`, `tracker.rs`, `db.rs`) and cover the tracking state machine and the SQLite aggregation/resolution logic. **Frontend** tests (Vitest) cover pure logic plus high-value React component flows. Run coverage with `bun run test:coverage`. There is no frontend linter; typechecking happens via `tsc` inside `bun run build`.
 
 ## Architecture
 
@@ -49,7 +50,8 @@ Two invariants the tests guard — preserve them when touching the poller/tracke
 - Projects are buckets. Time is linked to projects via **`day_assignments`**, keyed `(date, app_key, title, project_id)` — this is **many-to-many**: one app/title row on a given day can carry multiple project tags, and each tag bills the full duration (overlapping totals by design). Dragging an app/title onto a project in the UI assigns only the selected day(s), not all history. Use `add_assignment` / `remove_assignment`; there is no single-project `set_assignment`.
 - `title = ""` is the **app-level** assignment: a fallback covering every title not assigned on its own. The resolution rule lives in one place — the private **`Assignments`** module in `db.rs`: `links(date, key, title)` returns the set of project ids for the exact link (what the day view shows per row, so inheritance renders) and `resolve(date, key, title)` adds the app-level fallback (what `project_breakdown` / `project_apps` bill each segment to). Don't re-open-code this fallback at call sites.
 - Projects have a user-controlled `sort_order`; the `set_project_order` command reorders them. The frontend sends the full ordered id list; the backend updates each row's `sort_order` in a transaction.
-- `entry_notes` attaches a note to a `(project_id, app_key, title)` entry, same `title=""`-means-app-level convention.
+- `project_period_notes` attaches notes to project day/week/month buckets. Week views group day notes underneath the week note; month views group week notes underneath the month note. The old per-entry notes concept is retired.
+- Ignored activity is held in `ignored_entries` and excluded from Activities until the user removes the ignored rule.
 
 The Rust structs in `db.rs` are `#[derive(Serialize)]` and mirror the TS types in `src/api.ts` — keep these two files in sync when changing the wire shape. `api.ts` is the **only** place that calls `invoke`; the rest of the React app goes through the `api` object.
 

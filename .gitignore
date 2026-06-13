@@ -43,6 +43,8 @@ lerna-debug.log*
 # frontend build output
 dist/
 dist-ssr/
+coverage/
+.tmp/
 *.local
 
 # runtime data

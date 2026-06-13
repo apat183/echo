@@ -6,8 +6,8 @@ mod tray;
 
 use db::{DayTotal, DayView, DbState, IgnoredEntry, Project, ProjectApp, ProjectPeriodNote};
 use std::sync::{Arc, Mutex};
-use tracker::TrackerState;
 use tauri::{Manager, State};
+use tracker::TrackerState;
 
 #[tauri::command]
 fn get_day_view(state: State<'_, DbState>, date: String) -> Result<DayView, String> {
@@ -177,7 +177,9 @@ fn app_icon_data_url(bundle_id: String) -> Result<Option<String>, String> {
 #[cfg(target_os = "macos")]
 fn platform_app_icon_data_url(bundle_id: &str) -> Option<String> {
     use objc2::runtime::AnyObject;
-    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSWorkspace};
+    use objc2_app_kit::{
+        NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSWorkspace,
+    };
     use objc2_foundation::{NSDataBase64EncodingOptions, NSDictionary, NSString};
 
     let workspace = NSWorkspace::sharedWorkspace();
@@ -222,8 +224,10 @@ pub fn run() {
         })
         .setup(|app| {
             let dir = app.path().app_data_dir().expect("app data dir");
-            std::fs::create_dir_all(&dir).ok();
             let db_path = dir.join("echo.sqlite3");
+            if let Some(parent) = db_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
             let conn = db::open(&db_path).expect("open database");
 
             let shared: DbState = Arc::new(Mutex::new(conn));

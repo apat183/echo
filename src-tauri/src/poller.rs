@@ -31,7 +31,11 @@ fn read_frontmost() -> Option<FrontApp> {
     let name = app.localizedName().map(|s| s.to_string());
     // Best-effort window title via Accessibility; None when not permitted.
     let title = ax::focused_window_title(app.processIdentifier());
-    Some(FrontApp { bundle, name, title })
+    Some(FrontApp {
+        bundle,
+        name,
+        title,
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -76,7 +80,10 @@ pub fn process_tick(
 
     if changed {
         tracker::close_open_segment(&mut current, db, now);
-        *current = front.map(|f| OpenSegment { start_ts: now, app: f });
+        *current = front.map(|f| OpenSegment {
+            start_ts: now,
+            app: f,
+        });
     }
 }
 
