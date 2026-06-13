@@ -2,7 +2,7 @@
 
 Echo currently ships as a private, unsigned macOS build.
 
-## Before Tagging
+## Before Merging
 
 1. Confirm versions match:
 
@@ -15,7 +15,7 @@ Echo currently ships as a private, unsigned macOS build.
 
    ```sh
    bun install
-   bun run test:coverage
+   bun run test
    bun run build
    cd src-tauri
    cargo fmt --all -- --check
@@ -39,15 +39,23 @@ Echo currently ships as a private, unsigned macOS build.
    - Confirm activity appears in day/week/month views.
    - Confirm project assignment, ignored rules, and period notes persist after restart.
 
-## Tagging
+## Publishing
 
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
+Merge the release-ready branch to `main`. The release workflow runs on every
+push to `main`, creates or reuses a commit tag named `build-<shortsha>`, and
+publishes a GitHub Release named `Echo build-<shortsha>` as the latest release.
 
-The release workflow creates a draft GitHub Release with unsigned Intel and Apple
-Silicon DMGs. Review the draft, edit notes as needed, then publish it manually.
+The workflow builds unsigned Apple Silicon and Intel DMGs, then uploads both DMG
+assets to the published release. No manual `v*` tag or draft review step is
+required for the current private release path.
+
+After the workflow finishes:
+
+1. Open GitHub Releases and confirm the latest release is named
+   `Echo build-<shortsha>`.
+2. Confirm both Apple Silicon and Intel DMG assets are attached.
+3. Download one DMG, install locally, and confirm the unsigned macOS approval
+   flow is the only expected launch warning.
 
 ## Unsigned Build Notes
 

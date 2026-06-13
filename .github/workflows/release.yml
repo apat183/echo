@@ -2,21 +2,73 @@ name: Release
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag, for example v0.1.0
-        required: true
-        default: v0.1.0
   push:
-    tags:
-      - "v*"
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
+  prepare_release:
+    name: Prepare GitHub Release
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release.outputs.release_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create or update release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NOTES: |
+            Automated unsigned Echo build for this commit.
+
+            Downloads are ad-hoc signed and not notarized, so macOS may require manual approval before first launch.
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::7}"
+          release_tag="build-${short_sha}"
+          release_name="Echo ${release_tag}"
+
+          git fetch --tags origin
+
+          if git rev-parse "${release_tag}^{commit}" >/dev/null 2>&1; then
+            tagged_sha="$(git rev-parse "${release_tag}^{commit}")"
+            if [ "$tagged_sha" != "$GITHUB_SHA" ]; then
+              echo "Tag ${release_tag} already points to ${tagged_sha}, not ${GITHUB_SHA}."
+              exit 1
+            fi
+          else
+            git tag "$release_tag" "$GITHUB_SHA"
+            git push origin "refs/tags/${release_tag}"
+          fi
+
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release edit "$release_tag" \
+              --title "$release_name" \
+              --notes "$RELEASE_NOTES" \
+              --draft=false \
+              --prerelease=false \
+              --latest
+          else
+            gh release create "$release_tag" \
+              --verify-tag \
+              --title "$release_name" \
+              --notes "$RELEASE_NOTES" \
+              --latest
+          fi
+
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+
   macos:
     name: Build macOS ${{ matrix.target }}
+    needs: prepare_release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -49,15 +101,27 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build draft release
-        uses: tauri-apps/tauri-action@v0
+      - name: Build DMG
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_SIGNING_IDENTITY: "-"
-        with:
-          tagName: ${{ github.event.inputs.tag || github.ref_name }}
-          releaseName: Echo ${{ github.event.inputs.tag || github.ref_name }}
-          releaseBody: Private unsigned Echo build. macOS may require manual approval on first launch.
-          releaseDraft: true
-          prerelease: false
-          args: --target ${{ matrix.target }} --bundles dmg
+        run: bun run tauri build --target ${{ matrix.target }} --bundles dmg
+
+      - name: Upload DMG to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare_release.outputs.release_tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          dmgs=()
+          while IFS= read -r dmg; do
+            dmgs+=("$dmg")
+          done < <(find src-tauri/target -path "*/bundle/dmg/*.dmg" -type f -print | sort)
+
+          if [ "${#dmgs[@]}" -eq 0 ]; then
+            echo "No DMG files found for ${TARGET}."
+            exit 1
+          fi
+
+          gh release upload "$RELEASE_TAG" "${dmgs[@]}" --clobber
