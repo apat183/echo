@@ -9,7 +9,7 @@ open Echo, scan the day or week, drag apps or window titles into projects, and u
 the project view to understand where the time went. It is not built for teams,
 timesheets, billing, clients, rates, or invoices.
 
-![Echo activity chart](assets/readme/activity-chart.png)
+![Echo main activity view](assets/readme/Main.png)
 
 ## Features
 
@@ -23,7 +23,7 @@ timesheets, billing, clients, rates, or invoices.
   group week notes.
 - Local SQLite storage owned by the app.
 
-![Echo project notes](assets/readme/project-notes.png)
+![Echo project view](assets/readme/Project.png)
 
 ## Privacy
 
@@ -48,8 +48,8 @@ rough edges, schema changes, and macOS-first assumptions.
 ## Install
 
 Echo is currently distributed as a private, unsigned macOS build. Download the
-latest DMG from GitHub Releases, drag Echo into Applications, then open it from
-Finder.
+latest `Echo build-<shortsha>` DMG from GitHub Releases, drag Echo into
+Applications, then open it from Finder.
 
 Because the build is unsigned, macOS may require manual approval in System
 Settings before first launch. For a public release, Echo should be Developer ID
@@ -106,13 +106,13 @@ bun run tauri build --bundles dmg
 
 - `src/` - React UI.
 - `src-tauri/` - Rust shell, tracker, SQLite storage, tray integration, and macOS capture.
-- `.github/workflows/` - CI and draft-release automation.
+- `.github/workflows/` - CI and automatic unsigned-release automation.
 
 ## Release
 
-See `RELEASE.md` for the private unsigned release checklist. The GitHub Actions
-release workflow runs on `v*` tags or manual dispatch and creates a draft release
-with macOS DMG artifacts.
+See `RELEASE.md` for the private unsigned release checklist. Every push to
+`main` publishes a latest GitHub Release named `Echo build-<shortsha>` with macOS
+DMG artifacts.
 
 ## License
 
