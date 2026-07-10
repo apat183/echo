@@ -765,9 +765,11 @@ const AUTODELETE_DAYS: &str = "autodelete_days";
 const DEFAULT_AUTODELETE_DAYS: u32 = 30;
 
 pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
-    conn.query_row("SELECT value FROM app_settings WHERE key = ?1", [key], |r| {
-        r.get(0)
-    })
+    conn.query_row(
+        "SELECT value FROM app_settings WHERE key = ?1",
+        [key],
+        |r| r.get(0),
+    )
     .optional()
 }
 
@@ -1987,7 +1989,14 @@ mod tests {
         let d = "2026-02-03";
         let s = day_start_ts(d);
         seg(&conn, s + 10, s + 20, Some("com.b"), Some("B"), None); // untagged
-        seg(&conn, s + 30, s + 40, Some("com.a"), Some("A"), Some("keep")); // app-level tag
+        seg(
+            &conn,
+            s + 30,
+            s + 40,
+            Some("com.a"),
+            Some("A"),
+            Some("keep"),
+        ); // app-level tag
         let p = create_project(&conn, "Work", "#fff").unwrap();
         add_assignment(&conn, d, "com.a", "", p.id).unwrap();
 

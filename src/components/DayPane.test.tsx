@@ -11,6 +11,7 @@ const { mockApi } = vi.hoisted(() => ({
     axOpenSettings: vi.fn(),
     updateStatus: vi.fn(),
     installUpdate: vi.fn(),
+    removeAssignment: vi.fn(),
   },
 }));
 
@@ -52,6 +53,101 @@ beforeEach(() => {
   mockApi.axOpenSettings.mockResolvedValue(undefined);
   mockApi.updateStatus.mockResolvedValue({ state: "idle" });
   mockApi.installUpdate.mockResolvedValue(undefined);
+  mockApi.removeAssignment.mockResolvedValue(undefined);
+});
+
+// A day with one app carrying an app-level link (→ Work) and a title-level
+// link (Flow plan → Personal), used to exercise the unassign confirm guards.
+function linkedDay(date: string) {
+  return {
+    date,
+    total_seconds: 300,
+    hours: Array(24).fill(0),
+    apps: [
+      {
+        app_key: "com.warp",
+        app_name: "Warp",
+        bundle_id: "com.warp",
+        seconds: 300,
+        hours: Array(24).fill(0),
+        project_ids: [1],
+        titles: [
+          { title: "Flow plan", seconds: 200, project_ids: [2] },
+          { title: "Other doc", seconds: 100, project_ids: [] },
+        ],
+      },
+    ],
+  };
+}
+
+const linkedProjects = [
+  { id: 1, name: "Work", color: "#4f8cff" },
+  { id: 2, name: "Personal", color: "#ff6f61" },
+];
+
+function renderLinkedPane() {
+  return render(
+    <DayPane
+      projects={linkedProjects}
+      assignmentVersion={0}
+      onDragApp={vi.fn()}
+      onAssignmentChange={vi.fn()}
+    />
+  );
+}
+
+describe("DayPane unassign confirmation", () => {
+  beforeEach(() => {
+    mockApi.getDayView.mockImplementation((date: string) => Promise.resolve(linkedDay(date)));
+  });
+
+  it("confirms before unassigning an app-level project link", async () => {
+    const confirmSpy = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirmSpy);
+    renderLinkedPane();
+
+    await userEvent.click(await screen.findByTitle("Work — click to unassign"));
+
+    expect(confirmSpy).toHaveBeenCalledWith("Remove Warp from Work?");
+    await waitFor(() =>
+      expect(mockApi.removeAssignment).toHaveBeenCalledWith(
+        expect.any(String),
+        "com.warp",
+        "",
+        1,
+      )
+    );
+  });
+
+  it("leaves an app-level link untouched when the confirm is cancelled", async () => {
+    const confirmSpy = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmSpy);
+    renderLinkedPane();
+
+    await userEvent.click(await screen.findByTitle("Work — click to unassign"));
+
+    expect(confirmSpy).toHaveBeenCalledWith("Remove Warp from Work?");
+    expect(mockApi.removeAssignment).not.toHaveBeenCalled();
+  });
+
+  it("confirms before unassigning a title-level project link", async () => {
+    const confirmSpy = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirmSpy);
+    renderLinkedPane();
+
+    await userEvent.click(await screen.findByLabelText("Expand"));
+    await userEvent.click(await screen.findByTitle("Personal — click to unassign"));
+
+    expect(confirmSpy).toHaveBeenCalledWith("Remove Flow plan from Personal?");
+    await waitFor(() =>
+      expect(mockApi.removeAssignment).toHaveBeenCalledWith(
+        expect.any(String),
+        "com.warp",
+        "Flow plan",
+        2,
+      )
+    );
+  });
 });
 
 describe("DayPane update banner", () => {
@@ -66,6 +162,10 @@ describe("DayPane update banner", () => {
     renderPane();
 
     expect(await screen.findByText("0.1.42")).toBeInTheDocument();
+    // Signed builds keep the Accessibility grant across updates, so the banner
+    // must not tell the user to re-enable it.
+    expect(screen.queryByText(/Accessibility/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/restart to finish installing/i)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Restart & Update" }));
 
     await waitFor(() => expect(mockApi.installUpdate).toHaveBeenCalledOnce());

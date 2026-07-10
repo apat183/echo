@@ -9,6 +9,12 @@ jobs:
   validate:
     name: Validate
     runs-on: macos-latest
+    # Force every cargo/rustfmt/clippy call onto the pinned toolchain. The runner
+    # otherwise resolves a newer ambient rustfmt than the one installed below,
+    # which reformats unchanged code and breaks `cargo fmt --check`. Single source
+    # of truth for the version — the Setup Rust step reads it too.
+    env:
+      RUSTUP_TOOLCHAIN: "1.97.0"
 
     steps:
       - name: Checkout
@@ -22,7 +28,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
           components: rustfmt, clippy
 
       - name: Cache Rust
@@ -31,7 +37,10 @@ jobs:
           workspaces: src-tauri -> target
 
       - name: Install frontend dependencies
-        run: bun install --frozen-lockfile
+        # Dependabot bumps package.json but not bun.lock, so a frozen install
+        # fails on its PRs. Regenerate for those (the dependabot-lockfile workflow
+        # commits the refreshed bun.lock back); stay frozen everywhere else.
+        run: bun install ${{ github.event.pull_request.user.login == 'dependabot[bot]' && '--no-frozen-lockfile' || '--frozen-lockfile' }}
 
       - name: Run frontend tests with coverage
         run: bun run test:coverage
@@ -49,7 +58,9 @@ jobs:
 
       - name: Check Rust formatting
         working-directory: src-tauri
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --version
+          cargo fmt --all -- --check
 
       - name: Run Clippy
         working-directory: src-tauri

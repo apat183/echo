@@ -82,6 +82,10 @@ jobs:
     name: Build macOS aarch64
     needs: prepare_release
     runs-on: macos-latest
+    # Force the pinned toolchain (matches ci.yml) so the release build doesn't
+    # drift to the runner's ambient Rust.
+    env:
+      RUSTUP_TOOLCHAIN: "1.97.0"
 
     steps:
       - name: Checkout
@@ -95,7 +99,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
           targets: aarch64-apple-darwin
 
       - name: Cache Rust

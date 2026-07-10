@@ -100,6 +100,7 @@ describe("ProjectPane", () => {
     await userEvent.click(screen.getByLabelText("Expand"));
     await userEvent.click(await screen.findByTitle("Remove title from project"));
 
+    expect(window.confirm).toHaveBeenCalledWith("Remove Flow plan from this project?");
     await waitFor(() => {
       expect(mockApi.removeProjectTitleAssignments).toHaveBeenCalledWith(
         1,
@@ -108,5 +109,20 @@ describe("ProjectPane", () => {
       );
     });
     expect(onAssignmentChange).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an individual title assignment when the confirm is cancelled", async () => {
+    const confirmSpy = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmSpy);
+    const onAssignmentChange = vi.fn();
+    render(<ProjectPane project={project} onAssignmentChange={onAssignmentChange} />);
+
+    expect(await screen.findByText("Warp")).toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText("Expand"));
+    await userEvent.click(await screen.findByTitle("Remove title from project"));
+
+    expect(confirmSpy).toHaveBeenCalledWith("Remove Flow plan from this project?");
+    expect(mockApi.removeProjectTitleAssignments).not.toHaveBeenCalled();
+    expect(onAssignmentChange).not.toHaveBeenCalled();
   });
 });

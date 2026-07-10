@@ -152,6 +152,10 @@ export function DayPane(props: {
               app={a}
               projectById={projectById}
               onUnassign={async (title, projectId, dates) => {
+                // Removal is immediate and permanent (no undo), and the dot is an
+                // easy misclick next to the app name — so confirm first.
+                const projName = projectById.get(projectId)?.name ?? "this project";
+                if (!window.confirm(`Remove ${title || a.app_name} from ${projName}?`)) return;
                 await Promise.all(
                   dates.map((d) => api.removeAssignment(d, a.app_key, title, projectId))
                 );
@@ -184,7 +188,7 @@ function UpdateBanner(props: { update: UpdateStatus }) {
               Echo <strong>{update.version}</strong> is available.
             </span>
             <span className="banner-hint">
-              Updating replaces the app, so macOS will need Accessibility re-enabled afterwards.
+              Echo will restart to finish installing.
             </span>
           </div>
           <div className="banner-actions">

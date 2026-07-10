@@ -45,6 +45,14 @@ Echo falls back to app-level tracking.
 Echo is early-stage software and is being built around a personal workflow. Expect
 rough edges, schema changes, and macOS-first assumptions.
 
+It's built on [Tauri](https://tauri.app), so it's cross-platform by construction —
+the React UI and SQLite storage are portable, and the crate already compiles on
+Windows and Linux. The one platform-specific piece is activity capture (reading the
+frontmost app and window title), which is currently implemented only for macOS;
+elsewhere it's stubbed, so tracking is inert until a native capture backend is
+added. macOS is the only platform I run and test on, so Windows and Linux support
+needs contributors who use them. Contributions are very welcome.
+
 ## Requirements
 
 - macOS
