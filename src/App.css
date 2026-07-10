@@ -26,6 +26,35 @@
   }
 }
 
+/* Explicit theme override (the Appearance setting). The `[data-theme]`
+   attribute selectors outrank both `:root` and the media query's `:root`, so a
+   chosen Light/Dark wins over the OS setting. No attribute = "System" = the
+   media query above governs. Keep these token values in sync with `:root` and
+   the media block. */
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-sidebar: #f5f5f7;
+  --bg-elev: #ffffff;
+  --text: #1d1d1f;
+  --text-dim: #86868b;
+  --line: rgba(0, 0, 0, 0.08);
+  --hover: rgba(0, 0, 0, 0.04);
+  --active: rgba(0, 122, 255, 0.12);
+  --accent: #007aff;
+}
+
+:root[data-theme="dark"] {
+  --bg: #1e1e1e;
+  --bg-sidebar: #2a2a2c;
+  --bg-elev: #2c2c2e;
+  --text: #f5f5f7;
+  --text-dim: #98989d;
+  --line: rgba(255, 255, 255, 0.1);
+  --hover: rgba(255, 255, 255, 0.06);
+  --active: rgba(10, 132, 255, 0.22);
+  --accent: #0a84ff;
+}
+
 * {
   box-sizing: border-box;
 }
