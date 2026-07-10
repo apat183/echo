@@ -72,6 +72,7 @@ export function ProjectPane(props: { project?: Project; onAssignmentChange: () =
 
   async function removeProjectTitle(app: ProjectApp, title: string) {
     if (projectId == null) return;
+    if (!window.confirm(`Remove ${title} from this project?`)) return;
     await api.removeProjectTitleAssignments(projectId, app.app_key, title);
     await load();
     onAssignmentChange();
