@@ -1,6 +1,5 @@
-// Settings pane: Appearance, Storage, Startup, and About groups. Both the
-// sidebar gear and the tray "Settings…" item route here. Each section is filled
-// by its own sibling ticket; this shell ships the layout.
+// Settings pane: About, Appearance, Storage, and Startup groups. Both the
+// sidebar gear and the tray "Settings…" item route here.
 
 import { useCallback, useEffect, useState } from "react";
 import { Coffee, ExternalLink, Monitor, Moon, Settings, Sun } from "lucide-react";
@@ -126,6 +125,36 @@ export function SettingsPane(props: { onDataChanged?: () => void }) {
       </header>
 
       <div className="pane-body settings-body">
+        <section className="settings-section">
+          <h2 className="settings-section-title">About</h2>
+          <div className="settings-about">
+            <div className="settings-about-app">
+              <span className="settings-about-name">Echo</span>
+              <span className="settings-about-version">
+                {version ? `Version ${version}` : "…"}
+              </span>
+            </div>
+            <div className="settings-about-links">
+              <button
+                type="button"
+                className="ax-grant"
+                onClick={() => void api.openExternal(BUY_ME_A_COFFEE_URL)}
+              >
+                <Coffee size={14} />
+                Buy Me a Coffee
+              </button>
+              <button
+                type="button"
+                className="ax-grant secondary"
+                onClick={() => void api.openExternal(GITHUB_URL)}
+              >
+                <ExternalLink size={14} />
+                GitHub
+              </button>
+            </div>
+          </div>
+        </section>
+
         <section className="settings-section">
           <h2 className="settings-section-title">Appearance</h2>
           <div className="settings-row">
@@ -257,36 +286,6 @@ export function SettingsPane(props: { onDataChanged?: () => void }) {
                 options={ON_OFF_OPTIONS}
                 onChange={(v) => void changeLaunchAtLogin(v === "on")}
               />
-            </div>
-          </div>
-        </section>
-
-        <section className="settings-section">
-          <h2 className="settings-section-title">About</h2>
-          <div className="settings-about">
-            <div className="settings-about-app">
-              <span className="settings-about-name">Echo</span>
-              <span className="settings-about-version">
-                {version ? `Version ${version}` : "…"}
-              </span>
-            </div>
-            <div className="settings-about-links">
-              <button
-                type="button"
-                className="ax-grant"
-                onClick={() => void api.openExternal(BUY_ME_A_COFFEE_URL)}
-              >
-                <Coffee size={14} />
-                Buy Me a Coffee
-              </button>
-              <button
-                type="button"
-                className="ax-grant secondary"
-                onClick={() => void api.openExternal(GITHUB_URL)}
-              >
-                <ExternalLink size={14} />
-                GitHub
-              </button>
             </div>
           </div>
         </section>
