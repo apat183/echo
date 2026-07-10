@@ -6,7 +6,7 @@ and lets you group tracked activity into projects.
 
 This is a personal project first. The goal is to make time review lightweight:
 open Echo, scan the day or week, drag apps or window titles into projects, and use
-the project view to understand where the time went. It is not built for teams,
+the project view to understand where the time went. The time tracking is there to help with
 timesheets, billing, clients, rates, or invoices.
 
 ![Echo main activity view](assets/readme/Main.png)
