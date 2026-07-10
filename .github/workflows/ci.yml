@@ -32,10 +32,7 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      - name: Run frontend tests
-        run: bun run test
-
-      - name: Run frontend coverage
+      - name: Run frontend tests with coverage
         run: bun run test:coverage
 
       - name: Upload frontend coverage

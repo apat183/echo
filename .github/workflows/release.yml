@@ -49,19 +49,21 @@ jobs:
             git push origin "refs/tags/${release_tag}"
           fi
 
+          # Create/refresh the release as a DRAFT. The publish_release job
+          # promotes it to published + latest only after both DMGs upload, so a
+          # failed or partial build never leaves an empty "latest" release. The
+          # edit path intentionally leaves draft/latest state untouched (a re-run
+          # over an already-published release must not un-publish it).
           if gh release view "$release_tag" >/dev/null 2>&1; then
             gh release edit "$release_tag" \
               --title "$release_name" \
-              --notes "$RELEASE_NOTES" \
-              --draft=false \
-              --prerelease=false \
-              --latest
+              --notes "$RELEASE_NOTES"
           else
             gh release create "$release_tag" \
               --verify-tag \
+              --draft \
               --title "$release_name" \
-              --notes "$RELEASE_NOTES" \
-              --latest
+              --notes "$RELEASE_NOTES"
           fi
 
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
@@ -125,3 +127,25 @@ jobs:
           fi
 
           gh release upload "$RELEASE_TAG" "${dmgs[@]}" --clobber
+
+  publish_release:
+    name: Publish GitHub Release
+    # Runs only if every macos matrix leg succeeded (fail-fast: false means a
+    # single failed arch fails this job, so publish is skipped and the release
+    # stays a draft with whatever uploaded — never a broken public "latest").
+    needs: [prepare_release, macos]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Promote draft to latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare_release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          gh release edit "$RELEASE_TAG" \
+            --draft=false \
+            --prerelease=false \
+            --latest
