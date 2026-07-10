@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "A personal macOS time tracker"
 authors = ["Anand Patel"]
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/apat183/echo"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

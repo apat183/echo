@@ -3,6 +3,27 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "description": "A personal, local-only macOS menu-bar time tracker built with Tauri, React, and Rust.",
+  "license": "MIT",
+  "author": "Anand Patel",
+  "homepage": "https://github.com/apat183/echo#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/apat183/echo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/apat183/echo/issues"
+  },
+  "keywords": [
+    "time-tracking",
+    "macos",
+    "menu-bar",
+    "tauri",
+    "react",
+    "rust",
+    "local-first",
+    "productivity"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

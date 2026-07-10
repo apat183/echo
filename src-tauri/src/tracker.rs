@@ -1,6 +1,6 @@
 //! Shared tracking state. The open segment lives here (not thread-local in the
 //! poller) so pause and quit can close-and-write it — quitting must never lose
-//! the in-progress segment (spec §4).
+//! the in-progress segment.
 
 use crate::db::{self, DbState};
 use std::sync::atomic::AtomicBool;
