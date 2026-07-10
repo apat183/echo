@@ -23,6 +23,7 @@ pub struct TrayHandles {
     tray: TrayIcon,
     today_item: MenuItem<tauri::Wry>,
     pause_item: MenuItem<tauri::Wry>,
+    update_item: MenuItem<tauri::Wry>,
     /// Last rendered "Today: Xh Ym" string, to skip no-op updates.
     last_today: Mutex<String>,
 }
@@ -31,6 +32,7 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
     let today_item = MenuItem::with_id(app, "today", "Today: 0m", false, None::<&str>)?;
     let pause_item = MenuItem::with_id(app, "pause", "Pause time tracking", true, None::<&str>)?;
     let open_item = MenuItem::with_id(app, "open", "Open Echo", true, None::<&str>)?;
+    let update_item = MenuItem::with_id(app, "update", "Check for Updates…", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit Echo", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
@@ -41,6 +43,7 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
             &sep1,
             &pause_item,
             &open_item,
+            &update_item,
             &sep2,
             &quit_item,
         ],
@@ -61,6 +64,7 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
         tray,
         today_item,
         pause_item,
+        update_item,
         last_today: Mutex::new(String::new()),
     });
     Ok(())
@@ -70,6 +74,7 @@ fn on_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
         "pause" => toggle_pause(app),
         "open" => open_window(app),
+        "update" => crate::updater::on_tray_clicked(app),
         "quit" => app.exit(0), // flush happens in RunEvent::Exit (lib.rs)
         _ => {}
     }
@@ -108,6 +113,16 @@ fn open_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// Called from the updater as its state changes. Renames the update menu item
+/// ("Check for Updates…" / "Update Echo to X…" / "Downloading update…").
+pub fn set_update_text(app: &AppHandle, text: &str, enabled: bool) {
+    let Some(handles) = app.try_state::<TrayHandles>() else {
+        return;
+    };
+    let _ = handles.update_item.set_text(text);
+    let _ = handles.update_item.set_enabled(enabled);
 }
 
 /// Called from the poller tick. Updates the greyed Today line (always) and the

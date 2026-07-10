@@ -71,6 +71,12 @@ Echo is a menu-bar app, and several behaviors depend on macOS `ActivationPolicy`
 
 `ax.rs` reads the focused window title via the macOS Accessibility (AX) C API (`AXUIElementCopyAttributeValue`). This is **best-effort**: without the permission (or for apps exposing no title) it returns `None` and tracking degrades gracefully to app-level only. The `ax_status` / `ax_request` commands drive the permission UX. All macOS-specific code is `#[cfg(target_os = "macos")]`-gated with non-macOS stubs, so the crate still compiles elsewhere (with tracking inert).
 
+Because builds are **ad-hoc signed**, every installed update changes the code hash and silently invalidates the TCC Accessibility grant (System Settings still shows Echo enabled, but `AXIsProcessTrusted()` is false and the prompt won't re-fire). The ax banner in `DayPane` covers this: `ax_open_settings` deep-links to the Accessibility pane and the copy tells the user to toggle Echo off and on.
+
+### Auto-update
+
+The update flow is Rust-owned in `updater.rs`, mirroring existing patterns: the frontend polls the `update_status` command (like `ax_status`), the tray "Check for Updates…" item is push-updated (like `refresh_today`), and a background thread checks the release endpoint every 6h (release builds only — a debug build reports the committed `0.1.0` and would always see an "update"). Install is user-triggered (banner or tray), never silent. Before `app.restart()` the tracker is paused and the open segment flushed via `flush_for_restart` — `restart()` can skip `RunEvent::Exit`, so the exit-handler flush alone is not relied on (a double flush is a no-op). CI stamps the real version `0.1.<run_number>` via `tauri build --config` injection; the committed version stays `0.1.0` and local builds never need the updater signing key. The release workflow uploads `Echo.app.tar.gz` + `.sig` and composes `latest.json` before the draft release flips public.
+
 ### Adding a Tauri command
 
 1. Write the `db.rs` function (pure, takes `&Connection`).

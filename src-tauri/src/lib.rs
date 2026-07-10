@@ -3,6 +3,7 @@ mod db;
 mod poller;
 mod tracker;
 mod tray;
+mod updater;
 
 use db::{DayTotal, DayView, DbState, IgnoredEntry, Project, ProjectApp, ProjectPeriodNote};
 use std::sync::{Arc, Mutex};
@@ -135,6 +136,32 @@ fn ax_request() -> bool {
     ax::is_trusted()
 }
 
+/// Open System Settings → Privacy & Security → Accessibility. Needed after an
+/// update: the ad-hoc code signature changes, macOS keeps showing Echo as
+/// enabled but the grant is stale, and the AX prompt won't re-fire — the user
+/// has to toggle the entry off and on (or remove and re-add it).
+#[tauri::command]
+fn ax_open_settings() -> Result<(), String> {
+    tauri_plugin_opener::open_url(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Snapshot of the auto-update state machine; polled by the frontend banner.
+#[tauri::command]
+fn update_status(state: State<'_, Arc<updater::UpdaterState>>) -> updater::UpdateStatus {
+    updater::status(&state)
+}
+
+/// Download + install the pending update, then restart. On success the app
+/// restarts before this resolves, so the frontend treats it as fire-and-forget.
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    updater::install(app).await
+}
+
 #[tauri::command]
 fn project_breakdown(state: State<'_, DbState>, project_id: i64) -> Result<Vec<DayTotal>, String> {
     let conn = state.lock().map_err(|e| e.to_string())?;
@@ -207,6 +234,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             // Red close button = hide to the menu bar, keep tracking (spec §2).
             // Main window only: the Accessory switch is process-global.
@@ -240,6 +268,9 @@ pub fn run() {
 
             poller::spawn(app.handle().clone(), shared, track);
 
+            app.manage(Arc::new(updater::UpdaterState::default()));
+            updater::spawn_periodic_check(app.handle().clone());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -263,6 +294,9 @@ pub fn run() {
             app_icon_data_url,
             ax_status,
             ax_request,
+            ax_open_settings,
+            update_status,
+            install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

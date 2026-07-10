@@ -54,6 +54,14 @@ export type ProjectPeriodNote = {
   note: string;
 };
 
+// Mirrors `UpdateStatus` in src-tauri/src/updater.rs; keep the two in sync.
+export type UpdateStatus =
+  | { state: "idle" }
+  | { state: "available"; version: string }
+  | { state: "downloading"; version: string; downloaded: number; total: number | null }
+  | { state: "installing"; version: string }
+  | { state: "error"; message: string };
+
 export const api = {
   getDayView: (date: string) => invoke<DayView>("get_day_view", { date }),
   listProjects: () => invoke<Project[]>("list_projects"),
@@ -94,6 +102,9 @@ export const api = {
       : Promise.resolve(null),
   axStatus: () => invoke<boolean>("ax_status"),
   axRequest: () => invoke<boolean>("ax_request"),
+  axOpenSettings: () => invoke<void>("ax_open_settings"),
+  updateStatus: () => invoke<UpdateStatus>("update_status"),
+  installUpdate: () => invoke<void>("install_update"),
 };
 
 // ---- helpers --------------------------------------------------------------
