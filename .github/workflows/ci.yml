@@ -22,7 +22,9 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: stable
+          # Pinned: a floating `stable` drifts rustfmt and breaks `cargo fmt
+          # --check` on unchanged code. Bump deliberately (and reformat if needed).
+          toolchain: "1.96.0"
           components: rustfmt, clippy
 
       - name: Cache Rust
@@ -31,7 +33,10 @@ jobs:
           workspaces: src-tauri -> target
 
       - name: Install frontend dependencies
-        run: bun install --frozen-lockfile
+        # Dependabot bumps package.json but not bun.lock, so a frozen install
+        # fails on its PRs. Regenerate for those (the dependabot-lockfile workflow
+        # commits the refreshed bun.lock back); stay frozen everywhere else.
+        run: bun install ${{ github.event.pull_request.user.login == 'dependabot[bot]' && '--no-frozen-lockfile' || '--frozen-lockfile' }}
 
       - name: Run frontend tests with coverage
         run: bun run test:coverage

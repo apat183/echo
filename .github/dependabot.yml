@@ -7,6 +7,16 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
+      # Vite and its React plugin move in lockstep — @vitejs/plugin-react 6
+      # imports vite's internal exports, so it only builds against vite 8. Group
+      # the whole Vite/Vitest toolchain (majors included) into one PR so coupled
+      # bumps land together instead of as individually-broken PRs.
+      vite:
+        patterns:
+          - "vite"
+          - "@vitejs/*"
+          - "vitest"
+          - "@vitest/*"
       npm-minor-and-patch:
         update-types:
           - "minor"
