@@ -51,6 +51,18 @@ impl TrackerState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         close_open_segment(&mut slot, db, end_ts);
     }
+
+    /// Drop the open segment *without* writing it (poison-recovered), mirroring
+    /// `close_current` but discarding instead of flushing. The full-wipe storage
+    /// commands call this so a cleared DB stays empty; the poller opens a fresh
+    /// segment on its next tick.
+    pub fn discard_current(&self) {
+        let mut slot = self
+            .current
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = None;
+    }
 }
 
 /// "4h 12m" / "12m" / "0m" — minutes rounded down.
@@ -125,5 +137,20 @@ mod tests {
         let state = TrackerState::default();
         state.close_current(&db, 130);
         assert!(segments(&db).is_empty());
+    }
+
+    #[test]
+    fn discard_current_drops_open_segment_without_writing() {
+        let db = mem_db();
+        let state = TrackerState::default();
+        *state.current.lock().unwrap() = Some(OpenSegment {
+            start_ts: 100,
+            app: front("A"),
+        });
+
+        state.discard_current();
+
+        assert!(segments(&db).is_empty()); // discarded, not flushed
+        assert!(state.current.lock().unwrap().is_none());
     }
 }

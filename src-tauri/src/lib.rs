@@ -10,6 +10,10 @@ use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 use tracker::TrackerState;
 
+/// SQLite database filename inside the app data dir. WAL mode adds `-wal`/`-shm`
+/// siblings. Single source of truth for the DB path (open + size).
+const DB_FILENAME: &str = "echo.sqlite3";
+
 #[tauri::command]
 fn get_day_view(state: State<'_, DbState>, date: String) -> Result<DayView, String> {
     let conn = state.lock().map_err(|e| e.to_string())?;
@@ -149,6 +153,87 @@ fn ax_open_settings() -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// The running app version (CI-stamped `0.1.<run_number>` in releases, `0.1.0`
+/// in dev). Shown in the Settings → About section.
+#[tauri::command]
+fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+/// Open an external URL in the system browser. Used by the About links
+/// (Buy Me a Coffee, GitHub). Called Rust-side, so no webview capability change.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Total on-disk size of the SQLite database — main file + WAL + SHM — in bytes.
+#[tauri::command]
+fn storage_size(app: tauri::AppHandle) -> Result<u64, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let mut total = 0u64;
+    for suffix in ["", "-wal", "-shm"] {
+        let path = dir.join(format!("{DB_FILENAME}{suffix}"));
+        if let Ok(meta) = std::fs::metadata(path) {
+            total += meta.len();
+        }
+    }
+    Ok(total)
+}
+
+/// Clear all tracking data (segments + assignments + notes), keeping projects
+/// and ignore rules.
+///
+/// Drops the open segment *before* the wipe rather than holding `current` across
+/// it: `discard_current` empties the slot, so if a poller tick lands in the gap
+/// it finds `None`, writes nothing (only a non-empty slot flushes on close), and
+/// merely opens a fresh in-memory segment — which the following DELETE leaves
+/// untouched. No stale row can survive, and the two locks are taken sequentially
+/// (never nested), keeping lock order current → db.
+#[tauri::command]
+fn clear_tracking_data(
+    db: State<'_, DbState>,
+    track: State<'_, Arc<TrackerState>>,
+) -> Result<(), String> {
+    track.discard_current();
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    db::clear_tracking_data(&conn).map_err(|e| e.to_string())
+}
+
+/// Delete only untagged segments (those resolving to zero projects). Leaves the
+/// open segment alone — it may become tagged later.
+#[tauri::command]
+fn clear_untagged(db: State<'_, DbState>) -> Result<usize, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    db::clear_untagged(&conn).map_err(|e| e.to_string())
+}
+
+/// Wipe everything — all five tables. Drops the open segment first, as above.
+#[tauri::command]
+fn reset_everything(
+    db: State<'_, DbState>,
+    track: State<'_, Arc<TrackerState>>,
+) -> Result<(), String> {
+    track.discard_current();
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    db::reset_everything(&conn).map_err(|e| e.to_string())
+}
+
+/// The saved auto-delete-untagged config (enabled + day window).
+#[tauri::command]
+fn get_autodelete_config(db: State<'_, DbState>) -> Result<db::AutodeleteConfig, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    db::get_autodelete_config(&conn).map_err(|e| e.to_string())
+}
+
+/// Persist the auto-delete config. The scheduler re-reads it each run, so a
+/// change takes effect without a restart.
+#[tauri::command]
+fn set_autodelete_config(db: State<'_, DbState>, enabled: bool, days: u32) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    db::set_autodelete_config(&conn, enabled, days).map_err(|e| e.to_string())
+}
+
 /// Snapshot of the auto-update state machine; polled by the frontend banner.
 #[tauri::command]
 fn update_status(state: State<'_, Arc<updater::UpdaterState>>) -> updater::UpdateStatus {
@@ -229,12 +314,42 @@ fn platform_app_icon_data_url(_bundle_id: &str) -> Option<String> {
     None
 }
 
+/// Auto-delete scheduler: purge untagged segments older than the configured
+/// window once at startup (if enabled) and every 12h after. Config is re-read
+/// each run, so toggling takes effect without a restart. Unlike the updater's
+/// check, this runs in debug builds too so it can be exercised in `tauri dev`.
+fn spawn_autodelete(app: tauri::AppHandle) {
+    use std::time::Duration;
+    const INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
+    std::thread::spawn(move || loop {
+        run_autodelete(&app);
+        std::thread::sleep(INTERVAL);
+    });
+}
+
+fn run_autodelete(app: &tauri::AppHandle) {
+    let db = app.state::<DbState>();
+    let Ok(conn) = db.lock() else { return };
+    let Ok(cfg) = db::get_autodelete_config(&conn) else {
+        return;
+    };
+    if cfg.enabled {
+        // Only touches segments older than the window; the open segment (start =
+        // now) is never in range, so `current` needs no involvement.
+        let _ = db::purge_untagged_older_than(&conn, cfg.days);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .on_window_event(|window, event| {
             // Red close button = hide to the menu bar, keep tracking.
             // Main window only: the Accessory switch is process-global.
@@ -252,7 +367,7 @@ pub fn run() {
         })
         .setup(|app| {
             let dir = app.path().app_data_dir().expect("app data dir");
-            let db_path = dir.join("echo.sqlite3");
+            let db_path = dir.join(DB_FILENAME);
             if let Some(parent) = db_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
@@ -270,6 +385,8 @@ pub fn run() {
 
             app.manage(Arc::new(updater::UpdaterState::default()));
             updater::spawn_periodic_check(app.handle().clone());
+
+            spawn_autodelete(app.handle().clone());
 
             Ok(())
         })
@@ -295,6 +412,14 @@ pub fn run() {
             ax_status,
             ax_request,
             ax_open_settings,
+            app_version,
+            open_external,
+            storage_size,
+            clear_tracking_data,
+            clear_untagged,
+            reset_everything,
+            get_autodelete_config,
+            set_autodelete_config,
             update_status,
             install_update,
         ])

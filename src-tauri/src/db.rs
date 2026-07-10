@@ -13,7 +13,7 @@
 //! daily view and project breakdown stay consistent.
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -102,6 +102,14 @@ pub struct ProjectApp {
     pub titles: Vec<ProjectTitle>,
 }
 
+/// Auto-delete-untagged configuration.
+/// Mirrors `AutodeleteConfig` in src/api.ts; keep the two in sync.
+#[derive(Debug, Serialize)]
+pub struct AutodeleteConfig {
+    pub enabled: bool,
+    pub days: u32,
+}
+
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -147,6 +155,11 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             period_key  TEXT NOT NULL,
             note        TEXT NOT NULL,
             PRIMARY KEY (project_id, granularity, period_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );",
     )?;
     migrate_assignments_title(&conn)?;
@@ -644,6 +657,143 @@ pub(crate) fn day_start_ts(date: &str) -> i64 {
         .single()
         .expect("unambiguous midnight")
         .timestamp()
+}
+
+// ---- storage maintenance --------------------------------------------------
+
+/// The ids of segments that resolve to **zero** projects ("untagged"). `before`
+/// = `Some(ts)` restricts to segments *starting* before `ts` (auto-delete);
+/// `None` considers every segment ("clear untagged"). Untagged is defined by
+/// the same `Assignments::resolve` used everywhere else — the app-level
+/// (`title = ""`) fallback is included, so a title covered only by an app-level
+/// tag is NOT untagged.
+fn untagged_segment_ids(conn: &Connection, before: Option<i64>) -> rusqlite::Result<Vec<i64>> {
+    let assigns = Assignments::load(conn)?;
+    let sql = match before {
+        Some(_) => {
+            "SELECT id, start_ts, end_ts, app_bundle_id, app_name, window_title \
+             FROM segments WHERE start_ts < ?1"
+        }
+        None => "SELECT id, start_ts, end_ts, app_bundle_id, app_name, window_title FROM segments",
+    };
+    fn row(r: &rusqlite::Row) -> rusqlite::Result<(i64, Segment)> {
+        Ok((
+            r.get(0)?,
+            Segment {
+                start_ts: r.get(1)?,
+                end_ts: r.get(2)?,
+                bundle_id: r.get(3)?,
+                name: r.get(4)?,
+                title: r.get(5)?,
+            },
+        ))
+    }
+    let mut stmt = conn.prepare(sql)?;
+    let rows: Vec<(i64, Segment)> = match before {
+        Some(ts) => stmt
+            .query_map(rusqlite::params![ts], row)?
+            .collect::<rusqlite::Result<_>>()?,
+        None => stmt.query_map([], row)?.collect::<rusqlite::Result<_>>()?,
+    };
+    let mut ids = Vec::new();
+    for (id, seg) in rows {
+        if assigns
+            .resolve(&seg.local_date(), &seg.key(), &seg.title())
+            .is_empty()
+        {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Delete a set of segment ids atomically.
+fn delete_segment_ids(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for &id in ids {
+        tx.execute("DELETE FROM segments WHERE id = ?1", [id])?;
+    }
+    tx.commit()
+}
+
+/// Delete every untagged segment (any age). Keeps projects, assignments, and
+/// ignore rules. Returns the number of segments removed.
+pub fn clear_untagged(conn: &Connection) -> rusqlite::Result<usize> {
+    let ids = untagged_segment_ids(conn, None)?;
+    let n = ids.len();
+    delete_segment_ids(conn, &ids)?;
+    Ok(n)
+}
+
+/// Delete untagged segments that *started* more than `days` days ago. Used by
+/// the auto-delete scheduler. Returns the number removed.
+pub fn purge_untagged_older_than(conn: &Connection, days: u32) -> rusqlite::Result<usize> {
+    let cutoff = Local::now().timestamp() - i64::from(days) * 86_400;
+    let ids = untagged_segment_ids(conn, Some(cutoff))?;
+    let n = ids.len();
+    delete_segment_ids(conn, &ids)?;
+    Ok(n)
+}
+
+/// Clear all *tracking* data — segments, day assignments, and period notes —
+/// while keeping user-defined projects and ignore rules.
+pub fn clear_tracking_data(conn: &Connection) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM segments", [])?;
+    tx.execute("DELETE FROM day_assignments", [])?;
+    tx.execute("DELETE FROM project_period_notes", [])?;
+    tx.commit()
+}
+
+/// Wipe everything — all five data tables. Used by "Reset everything". Leaves
+/// `app_settings` (theme lives in localStorage; auto-delete config is intentionally
+/// preserved so a reset doesn't silently re-enable/disable purging).
+pub fn reset_everything(conn: &Connection) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM segments", [])?;
+    tx.execute("DELETE FROM day_assignments", [])?;
+    tx.execute("DELETE FROM project_period_notes", [])?;
+    tx.execute("DELETE FROM ignored_entries", [])?;
+    tx.execute("DELETE FROM projects", [])?;
+    tx.commit()
+}
+
+// ---- app settings (key/value config) --------------------------------------
+
+const AUTODELETE_ENABLED: &str = "autodelete_enabled";
+const AUTODELETE_DAYS: &str = "autodelete_days";
+const DEFAULT_AUTODELETE_DAYS: u32 = 30;
+
+pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT value FROM app_settings WHERE key = ?1", [key], |r| {
+        r.get(0)
+    })
+    .optional()
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![key, value],
+    )?;
+    Ok(())
+}
+
+/// The saved auto-delete config. Defaults: disabled, 30 days.
+pub fn get_autodelete_config(conn: &Connection) -> rusqlite::Result<AutodeleteConfig> {
+    let enabled = get_setting(conn, AUTODELETE_ENABLED)?.as_deref() == Some("1");
+    let days = get_setting(conn, AUTODELETE_DAYS)?
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&d| d >= 1)
+        .unwrap_or(DEFAULT_AUTODELETE_DAYS);
+    Ok(AutodeleteConfig { enabled, days })
+}
+
+pub fn set_autodelete_config(conn: &Connection, enabled: bool, days: u32) -> rusqlite::Result<()> {
+    set_setting(conn, AUTODELETE_ENABLED, if enabled { "1" } else { "0" })?;
+    set_setting(conn, AUTODELETE_DAYS, &days.max(1).to_string())?;
+    Ok(())
 }
 
 pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
@@ -1758,5 +1908,147 @@ mod tests {
             projects.iter().map(|p| p.id).collect::<Vec<_>>(),
             projects2.iter().map(|p| p.id).collect::<Vec<_>>()
         );
+    }
+
+    // ---- storage maintenance ----
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// A tracked segment + a project assignment + a note + an ignore rule.
+    fn seed_all(conn: &Connection, date: &str) {
+        let s = day_start_ts(date);
+        seg(conn, s, s + 100, Some("com.a"), Some("A"), None);
+        let p = create_project(conn, "Work", "#fff").unwrap();
+        add_assignment(conn, date, "com.a", "", p.id).unwrap();
+        set_project_period_note(conn, p.id, "day", date, "note").unwrap();
+        add_ignored_entry(conn, "com.b", Some("B"), "").unwrap();
+    }
+
+    #[test]
+    fn clear_tracking_data_keeps_projects_and_ignores() {
+        let conn = mem();
+        seed_all(&conn, "2026-02-01");
+
+        clear_tracking_data(&conn).unwrap();
+
+        assert_eq!(count(&conn, "segments"), 0);
+        assert_eq!(count(&conn, "day_assignments"), 0);
+        assert_eq!(count(&conn, "project_period_notes"), 0);
+        assert_eq!(count(&conn, "projects"), 1); // kept
+        assert_eq!(count(&conn, "ignored_entries"), 1); // kept
+    }
+
+    #[test]
+    fn reset_everything_wipes_all_five_tables() {
+        let conn = mem();
+        seed_all(&conn, "2026-02-01");
+
+        reset_everything(&conn).unwrap();
+
+        for t in [
+            "segments",
+            "day_assignments",
+            "project_period_notes",
+            "projects",
+            "ignored_entries",
+        ] {
+            assert_eq!(count(&conn, t), 0, "table {t} not empty");
+        }
+    }
+
+    #[test]
+    fn clear_untagged_deletes_only_unassigned_segments() {
+        let conn = mem();
+        let d = "2026-02-02";
+        let s = day_start_ts(d);
+        // com.a title "doc" is covered by an app-level assignment → tagged, kept.
+        seg(&conn, s, s + 100, Some("com.a"), Some("A"), Some("doc"));
+        // com.b has no assignment → untagged, removed.
+        seg(&conn, s + 100, s + 200, Some("com.b"), Some("B"), None);
+        let p = create_project(&conn, "Work", "#fff").unwrap();
+        add_assignment(&conn, d, "com.a", "", p.id).unwrap();
+
+        let removed = clear_untagged(&conn).unwrap();
+
+        assert_eq!(removed, 1);
+        assert_eq!(count(&conn, "segments"), 1);
+        let survivor: String = conn
+            .query_row("SELECT app_name FROM segments", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(survivor, "A");
+    }
+
+    #[test]
+    fn untagged_segment_ids_respects_age_cutoff_and_app_level_fallback() {
+        let conn = mem();
+        let d = "2026-02-03";
+        let s = day_start_ts(d);
+        seg(&conn, s + 10, s + 20, Some("com.b"), Some("B"), None); // untagged
+        seg(&conn, s + 30, s + 40, Some("com.a"), Some("A"), Some("keep")); // app-level tag
+        let p = create_project(&conn, "Work", "#fff").unwrap();
+        add_assignment(&conn, d, "com.a", "", p.id).unwrap();
+
+        // Whole DB: only com.b resolves to zero projects.
+        assert_eq!(untagged_segment_ids(&conn, None).unwrap().len(), 1);
+        // Cutoff before both starts: nothing qualifies.
+        assert!(untagged_segment_ids(&conn, Some(s)).unwrap().is_empty());
+        // Cutoff after com.b's start only: just com.b.
+        assert_eq!(untagged_segment_ids(&conn, Some(s + 25)).unwrap().len(), 1);
+    }
+
+    // ---- app settings + auto-delete ----
+
+    #[test]
+    fn get_and_set_setting_round_trip() {
+        let conn = mem();
+        assert_eq!(get_setting(&conn, "k").unwrap(), None);
+        set_setting(&conn, "k", "v1").unwrap();
+        assert_eq!(get_setting(&conn, "k").unwrap(), Some("v1".to_string()));
+        set_setting(&conn, "k", "v2").unwrap(); // upsert, not a second row
+        assert_eq!(get_setting(&conn, "k").unwrap(), Some("v2".to_string()));
+        assert_eq!(count(&conn, "app_settings"), 1);
+    }
+
+    #[test]
+    fn autodelete_config_defaults_off_30_and_round_trips() {
+        let conn = mem();
+        let def = get_autodelete_config(&conn).unwrap();
+        assert!(!def.enabled);
+        assert_eq!(def.days, 30);
+
+        set_autodelete_config(&conn, true, 7).unwrap();
+        let cfg = get_autodelete_config(&conn).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.days, 7);
+    }
+
+    #[test]
+    fn purge_untagged_older_than_respects_cutoff_and_spares_tagged() {
+        let conn = mem();
+        let now = Local::now().timestamp();
+        let old = now - 40 * 86_400; // 40 days ago
+        let recent = now - 86_400; // 1 day ago
+
+        seg(&conn, old, old + 100, Some("com.b"), Some("B"), None); // old + untagged
+        seg(&conn, recent, recent + 100, Some("com.c"), Some("C"), None); // recent + untagged
+        seg(&conn, old, old + 100, Some("com.a"), Some("A"), None); // old but tagged
+        let p = create_project(&conn, "Work", "#fff").unwrap();
+        add_assignment(&conn, &local_date_string(old), "com.a", "", p.id).unwrap();
+
+        let removed = purge_untagged_older_than(&conn, 30).unwrap();
+
+        assert_eq!(removed, 1); // only com.b
+        let mut stmt = conn
+            .prepare("SELECT app_name FROM segments ORDER BY app_name")
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(names, vec!["A".to_string(), "C".to_string()]);
     }
 }

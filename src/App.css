@@ -26,6 +26,35 @@
   }
 }
 
+/* Explicit theme override (the Appearance setting). The `[data-theme]`
+   attribute selectors outrank both `:root` and the media query's `:root`, so a
+   chosen Light/Dark wins over the OS setting. No attribute = "System" = the
+   media query above governs. Keep these token values in sync with `:root` and
+   the media block. */
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-sidebar: #f5f5f7;
+  --bg-elev: #ffffff;
+  --text: #1d1d1f;
+  --text-dim: #86868b;
+  --line: rgba(0, 0, 0, 0.08);
+  --hover: rgba(0, 0, 0, 0.04);
+  --active: rgba(0, 122, 255, 0.12);
+  --accent: #007aff;
+}
+
+:root[data-theme="dark"] {
+  --bg: #1e1e1e;
+  --bg-sidebar: #2a2a2c;
+  --bg-elev: #2c2c2e;
+  --text: #f5f5f7;
+  --text-dim: #98989d;
+  --line: rgba(255, 255, 255, 0.1);
+  --hover: rgba(255, 255, 255, 0.06);
+  --active: rgba(10, 132, 255, 0.22);
+  --accent: #0a84ff;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -202,11 +231,13 @@ body {
 }
 
 .ignore-target,
+.settings-nav,
 .collapse-nav {
   color: var(--text-dim);
 }
 
 .ignore-icon,
+.settings-icon,
 .collapse-icon {
   width: 22px;
   height: 22px;
@@ -220,11 +251,13 @@ body {
 
 .ignore-target.drop-over .ignore-icon,
 .ignore-target:hover .ignore-icon,
+.settings-nav:hover .settings-icon,
 .collapse-nav:hover .collapse-icon {
   color: var(--text);
 }
 
 .sidebar.collapsed .ignore-icon,
+.sidebar.collapsed .settings-icon,
 .sidebar.collapsed .collapse-icon {
   width: 30px;
   height: 30px;
@@ -1146,7 +1179,8 @@ body {
   color: var(--text-dim);
 }
 
-.ignore-pane-icon {
+.ignore-pane-icon,
+.settings-pane-icon {
   width: 22px;
   height: 22px;
   border-radius: 6px;
@@ -1155,6 +1189,140 @@ body {
   justify-content: center;
   background: var(--hover);
   color: var(--text-dim);
+}
+
+/* ---- settings pane ---- */
+
+.settings-title {
+  color: var(--text-dim);
+}
+
+.settings-section {
+  margin-bottom: 30px;
+}
+
+.settings-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 12px;
+}
+
+.settings-placeholder {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 0;
+}
+
+/* A settings row: a label/description on the left, a control on the right. */
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-row:last-child {
+  border-bottom: none;
+}
+
+.settings-row-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings-row-label {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.settings-row-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.settings-row-control {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* About */
+.settings-about {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-about-app {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-about-name {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.settings-about-version {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.settings-about-links {
+  display: flex;
+  gap: 10px;
+}
+
+.settings-about-links .ax-grant {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Storage */
+.settings-storage-size {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.settings-days-input {
+  width: 62px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 13px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-days-unit {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+/* Destructive button variant, reusing the outlined secondary shape. */
+.ax-grant.danger {
+  background: transparent;
+  color: #ff3b30;
+  border: 1px solid color-mix(in srgb, #ff3b30 45%, transparent);
+}
+
+.ax-grant.danger:hover {
+  background: color-mix(in srgb, #ff3b30 12%, transparent);
+  filter: none;
 }
 
 .ignored-rule-row {
