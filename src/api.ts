@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 
 export type Project = { id: number; name: string; color: string };
 
@@ -115,6 +116,10 @@ export const api = {
   getAutodeleteConfig: () => invoke<AutodeleteConfig>("get_autodelete_config"),
   setAutodeleteConfig: (enabled: boolean, days: number) =>
     invoke<void>("set_autodelete_config", { enabled, days }),
+  // Launch-at-login, via tauri-plugin-autostart (its JS API wraps invoke itself).
+  autostartIsEnabled: () => isEnabled(),
+  autostartEnable: () => enable(),
+  autostartDisable: () => disable(),
   updateStatus: () => invoke<UpdateStatus>("update_status"),
   installUpdate: () => invoke<void>("install_update"),
 };

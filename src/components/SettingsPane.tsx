@@ -22,6 +22,7 @@ export function SettingsPane(props: { onDataChanged?: () => void }) {
   const [size, setSize] = useState<number | null>(null);
   const [autodelete, setAutodelete] = useState<AutodeleteConfig>({ enabled: false, days: 30 });
   const [daysText, setDaysText] = useState("30");
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
 
   const refreshSize = useCallback(() => {
     api.storageSize().then(setSize).catch(() => setSize(null));
@@ -44,6 +45,21 @@ export function SettingsPane(props: { onDataChanged?: () => void }) {
       })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    api.autostartIsEnabled().then(setLaunchAtLogin).catch(() => {});
+  }, []);
+
+  async function changeLaunchAtLogin(on: boolean) {
+    setLaunchAtLogin(on); // optimistic
+    try {
+      if (on) await api.autostartEnable();
+      else await api.autostartDisable();
+    } catch {
+      // Reconcile with the real login-item state if the toggle failed.
+    }
+    api.autostartIsEnabled().then(setLaunchAtLogin).catch(() => {});
+  }
 
   function saveAutodelete(enabled: boolean, days: number) {
     setAutodelete({ enabled, days });
@@ -228,7 +244,24 @@ export function SettingsPane(props: { onDataChanged?: () => void }) {
 
         <section className="settings-section">
           <h2 className="settings-section-title">Startup</h2>
-          <p className="settings-placeholder">Coming soon.</p>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <span className="settings-row-label">Launch Echo at login</span>
+              <span className="settings-row-hint">
+                Start tracking automatically when you sign in.
+              </span>
+            </div>
+            <div className="settings-row-control">
+              <Segmented
+                value={launchAtLogin ? "on" : "off"}
+                options={[
+                  { value: "on" as OnOff, label: "On" },
+                  { value: "off" as OnOff, label: "Off" },
+                ]}
+                onChange={(v) => void changeLaunchAtLogin(v === "on")}
+              />
+            </div>
+          </div>
         </section>
 
         <section className="settings-section">
