@@ -105,6 +105,10 @@ export const api = {
   axOpenSettings: () => invoke<void>("ax_open_settings"),
   appVersion: () => invoke<string>("app_version"),
   openExternal: (url: string) => invoke<void>("open_external", { url }),
+  storageSize: () => invoke<number>("storage_size"),
+  clearTrackingData: () => invoke<void>("clear_tracking_data"),
+  clearUntagged: () => invoke<number>("clear_untagged"),
+  resetEverything: () => invoke<void>("reset_everything"),
   updateStatus: () => invoke<UpdateStatus>("update_status"),
   installUpdate: () => invoke<void>("install_update"),
 };
@@ -137,6 +141,19 @@ export function fmtDur(seconds: number): string {
   const h = Math.floor(m / 60);
   const rem = m % 60;
   return rem ? `${h}h ${rem}m` : `${h}h`;
+}
+
+/** Human-readable byte size, e.g. "0 B", "12.0 KB", "1.2 MB". */
+export function fmtBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let n = bytes / 1024;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return `${n.toFixed(1)} ${units[i]}`;
 }
 
 /** Monday-of-week ISO label, e.g. "Week of Mon 9 Jun". */

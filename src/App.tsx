@@ -56,6 +56,14 @@ export default function App() {
     refreshProjects();
   }, [refreshProjects]);
 
+  // A Settings clear/reset can delete projects, assignments, and ignore rules —
+  // refresh everything the sidebar and panes read.
+  const handleDataChanged = useCallback(() => {
+    setAssignmentVersion((v) => v + 1);
+    setIgnoredVersion((v) => v + 1);
+    refreshProjects();
+  }, [refreshProjects]);
+
   useEffect(() => {
     refreshProjects();
   }, [refreshProjects]);
@@ -91,7 +99,7 @@ export default function App() {
         ) : selection.kind === "ignored" ? (
           <IgnoredPane refreshKey={ignoredVersion} onChanged={handleIgnoredChanged} />
         ) : selection.kind === "settings" ? (
-          <SettingsPane />
+          <SettingsPane onDataChanged={handleDataChanged} />
         ) : (
           <ProjectPane
             project={projects.find((p) => p.id === selection.id)}

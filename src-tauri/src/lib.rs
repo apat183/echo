@@ -163,6 +163,52 @@ fn open_external(url: String) -> Result<(), String> {
     tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// Total on-disk size of the SQLite database — main file + WAL + SHM — in bytes.
+#[tauri::command]
+fn storage_size(app: tauri::AppHandle) -> Result<u64, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let mut total = 0u64;
+    for name in ["echo.sqlite3", "echo.sqlite3-wal", "echo.sqlite3-shm"] {
+        if let Ok(meta) = std::fs::metadata(dir.join(name)) {
+            total += meta.len();
+        }
+    }
+    Ok(total)
+}
+
+/// Clear all tracking data (segments + assignments + notes), keeping projects
+/// and ignore rules. Drops the open segment first so the wiped DB stays empty
+/// (the poller opens a fresh one on its next tick); the two locks are taken
+/// sequentially, never nested, preserving lock order current → db.
+#[tauri::command]
+fn clear_tracking_data(
+    db: State<'_, DbState>,
+    track: State<'_, Arc<TrackerState>>,
+) -> Result<(), String> {
+    track.discard_current();
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    db::clear_tracking_data(&conn).map_err(|e| e.to_string())
+}
+
+/// Delete only untagged segments (those resolving to zero projects). Leaves the
+/// open segment alone — it may become tagged later.
+#[tauri::command]
+fn clear_untagged(db: State<'_, DbState>) -> Result<usize, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    db::clear_untagged(&conn).map_err(|e| e.to_string())
+}
+
+/// Wipe everything — all five tables. Drops the open segment first, as above.
+#[tauri::command]
+fn reset_everything(
+    db: State<'_, DbState>,
+    track: State<'_, Arc<TrackerState>>,
+) -> Result<(), String> {
+    track.discard_current();
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    db::reset_everything(&conn).map_err(|e| e.to_string())
+}
+
 /// Snapshot of the auto-update state machine; polled by the frontend banner.
 #[tauri::command]
 fn update_status(state: State<'_, Arc<updater::UpdaterState>>) -> updater::UpdateStatus {
@@ -311,6 +357,10 @@ pub fn run() {
             ax_open_settings,
             app_version,
             open_external,
+            storage_size,
+            clear_tracking_data,
+            clear_untagged,
+            reset_everything,
             update_status,
             install_update,
         ])

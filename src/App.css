@@ -1289,6 +1289,25 @@ body {
   gap: 6px;
 }
 
+/* Storage */
+.settings-storage-size {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+/* Destructive button variant, reusing the outlined secondary shape. */
+.ax-grant.danger {
+  background: transparent;
+  color: #ff3b30;
+  border: 1px solid color-mix(in srgb, #ff3b30 45%, transparent);
+}
+
+.ax-grant.danger:hover {
+  background: color-mix(in srgb, #ff3b30 12%, transparent);
+  filter: none;
+}
+
 .ignored-rule-row {
   cursor: default;
 }

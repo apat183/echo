@@ -2,27 +2,72 @@
 // sidebar gear and the tray "Settings…" item route here. Each section is filled
 // by its own sibling ticket; this shell ships the layout.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Coffee, ExternalLink, Monitor, Moon, Settings, Sun } from "lucide-react";
-import { api } from "../api";
+import { ask } from "@tauri-apps/plugin-dialog";
+import { api, fmtBytes } from "../api";
 import { applyTheme, loadTheme, saveTheme, type Theme } from "../theme";
 import { Segmented } from "./Segmented";
 
 const BUY_ME_A_COFFEE_URL = "https://buymeacoffee.com/anandpatel";
 const GITHUB_URL = "https://github.com/apat183/echo";
 
-export function SettingsPane() {
+/** `onDataChanged` fires after a clear/reset so the rest of the app can refetch. */
+export function SettingsPane(props: { onDataChanged?: () => void }) {
+  const { onDataChanged } = props;
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const [version, setVersion] = useState<string | null>(null);
+  const [size, setSize] = useState<number | null>(null);
+
+  const refreshSize = useCallback(() => {
+    api.storageSize().then(setSize).catch(() => setSize(null));
+  }, []);
 
   useEffect(() => {
     api.appVersion().then(setVersion).catch(() => setVersion(null));
   }, []);
 
+  useEffect(() => {
+    refreshSize();
+  }, [refreshSize]);
+
   function changeTheme(next: Theme) {
     setTheme(next);
     applyTheme(next);
     saveTheme(next);
+  }
+
+  async function clearUntagged() {
+    const ok = await ask(
+      "Delete all activity that isn't assigned to any project? This cannot be undone.",
+      { title: "Clear untagged data?", kind: "warning" }
+    );
+    if (!ok) return;
+    await api.clearUntagged();
+    refreshSize();
+    onDataChanged?.();
+  }
+
+  async function clearTracking() {
+    const ok = await ask(
+      "Delete all tracked activity and project assignments? Your projects and ignore rules are kept. This cannot be undone.",
+      { title: "Clear all tracking data?", kind: "warning" }
+    );
+    if (!ok) return;
+    await api.clearTrackingData();
+    refreshSize();
+    onDataChanged?.();
+  }
+
+  async function resetEverything() {
+    const ok = await ask(
+      "Delete everything — all activity, projects, and ignore rules? This cannot be undone.",
+      { title: "Reset everything?", kind: "warning" }
+    );
+    if (!ok) return;
+    await api.resetEverything();
+    refreshSize();
+    onDataChanged?.();
   }
 
   return (
@@ -62,7 +107,56 @@ export function SettingsPane() {
 
         <section className="settings-section">
           <h2 className="settings-section-title">Storage</h2>
-          <p className="settings-placeholder">Coming soon.</p>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <span className="settings-row-label">Database size</span>
+              <span className="settings-row-hint">Local SQLite file (main + WAL + SHM).</span>
+            </div>
+            <div className="settings-row-control">
+              <span className="settings-storage-size">
+                {size == null ? "…" : fmtBytes(size)}
+              </span>
+            </div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <span className="settings-row-label">Clear untagged data</span>
+              <span className="settings-row-hint">
+                Delete activity not assigned to any project.
+              </span>
+            </div>
+            <div className="settings-row-control">
+              <button type="button" className="ax-grant secondary" onClick={clearUntagged}>
+                Clear
+              </button>
+            </div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <span className="settings-row-label">Clear all tracking data</span>
+              <span className="settings-row-hint">
+                Delete all activity and assignments. Keeps projects and ignore rules.
+              </span>
+            </div>
+            <div className="settings-row-control">
+              <button type="button" className="ax-grant danger" onClick={clearTracking}>
+                Clear
+              </button>
+            </div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <span className="settings-row-label">Reset everything</span>
+              <span className="settings-row-hint">
+                Delete all data, including projects and ignore rules.
+              </span>
+            </div>
+            <div className="settings-row-control">
+              <button type="button" className="ax-grant danger" onClick={resetEverything}>
+                Reset
+              </button>
+            </div>
+          </div>
         </section>
 
         <section className="settings-section">
