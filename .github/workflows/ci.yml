@@ -9,6 +9,12 @@ jobs:
   validate:
     name: Validate
     runs-on: macos-latest
+    # Force every cargo/rustfmt/clippy call onto the pinned toolchain. The runner
+    # otherwise resolves a newer ambient rustfmt than the one installed below,
+    # which reformats unchanged code and breaks `cargo fmt --check`. Single source
+    # of truth for the version — the Setup Rust step reads it too.
+    env:
+      RUSTUP_TOOLCHAIN: "1.97.0"
 
     steps:
       - name: Checkout
@@ -22,9 +28,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          # Pinned: a floating `stable` drifts rustfmt and breaks `cargo fmt
-          # --check` on unchanged code. Bump deliberately (and reformat if needed).
-          toolchain: "1.96.0"
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
           components: rustfmt, clippy
 
       - name: Cache Rust
@@ -54,7 +58,9 @@ jobs:
 
       - name: Check Rust formatting
         working-directory: src-tauri
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --version
+          cargo fmt --all -- --check
 
       - name: Run Clippy
         working-directory: src-tauri
