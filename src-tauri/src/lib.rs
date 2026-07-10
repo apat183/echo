@@ -149,6 +149,20 @@ fn ax_open_settings() -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// The running app version (CI-stamped `0.1.<run_number>` in releases, `0.1.0`
+/// in dev). Shown in the Settings → About section.
+#[tauri::command]
+fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+/// Open an external URL in the system browser. Used by the About links
+/// (Buy Me a Coffee, GitHub). Called Rust-side, so no webview capability change.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| e.to_string())
+}
+
 /// Snapshot of the auto-update state machine; polled by the frontend banner.
 #[tauri::command]
 fn update_status(state: State<'_, Arc<updater::UpdaterState>>) -> updater::UpdateStatus {
@@ -295,6 +309,8 @@ pub fn run() {
             ax_status,
             ax_request,
             ax_open_settings,
+            app_version,
+            open_external,
             update_status,
             install_update,
         ])

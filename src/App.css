@@ -1254,6 +1254,41 @@ body {
   gap: 8px;
 }
 
+/* About */
+.settings-about {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-about-app {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-about-name {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.settings-about-version {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.settings-about-links {
+  display: flex;
+  gap: 10px;
+}
+
+.settings-about-links .ax-grant {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .ignored-rule-row {
   cursor: default;
 }

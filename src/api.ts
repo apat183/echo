@@ -103,6 +103,8 @@ export const api = {
   axStatus: () => invoke<boolean>("ax_status"),
   axRequest: () => invoke<boolean>("ax_request"),
   axOpenSettings: () => invoke<void>("ax_open_settings"),
+  appVersion: () => invoke<string>("app_version"),
+  openExternal: (url: string) => invoke<void>("open_external", { url }),
   updateStatus: () => invoke<UpdateStatus>("update_status"),
   installUpdate: () => invoke<void>("install_update"),
 };

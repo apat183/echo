@@ -2,13 +2,22 @@
 // sidebar gear and the tray "Settings…" item route here. Each section is filled
 // by its own sibling ticket; this shell ships the layout.
 
-import { useState } from "react";
-import { Monitor, Moon, Settings, Sun } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Coffee, ExternalLink, Monitor, Moon, Settings, Sun } from "lucide-react";
+import { api } from "../api";
 import { applyTheme, loadTheme, saveTheme, type Theme } from "../theme";
 import { Segmented } from "./Segmented";
 
+const BUY_ME_A_COFFEE_URL = "https://buymeacoffee.com/anandpatel";
+const GITHUB_URL = "https://github.com/apat183/echo";
+
 export function SettingsPane() {
   const [theme, setTheme] = useState<Theme>(loadTheme);
+  const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.appVersion().then(setVersion).catch(() => setVersion(null));
+  }, []);
 
   function changeTheme(next: Theme) {
     setTheme(next);
@@ -63,7 +72,32 @@ export function SettingsPane() {
 
         <section className="settings-section">
           <h2 className="settings-section-title">About</h2>
-          <p className="settings-placeholder">Coming soon.</p>
+          <div className="settings-about">
+            <div className="settings-about-app">
+              <span className="settings-about-name">Echo</span>
+              <span className="settings-about-version">
+                {version ? `Version ${version}` : "…"}
+              </span>
+            </div>
+            <div className="settings-about-links">
+              <button
+                type="button"
+                className="ax-grant"
+                onClick={() => void api.openExternal(BUY_ME_A_COFFEE_URL)}
+              >
+                <Coffee size={14} />
+                Buy Me a Coffee
+              </button>
+              <button
+                type="button"
+                className="ax-grant secondary"
+                onClick={() => void api.openExternal(GITHUB_URL)}
+              >
+                <ExternalLink size={14} />
+                GitHub
+              </button>
+            </div>
+          </div>
         </section>
       </div>
     </>
