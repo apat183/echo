@@ -10,6 +10,10 @@ use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 use tracker::TrackerState;
 
+/// SQLite database filename inside the app data dir. WAL mode adds `-wal`/`-shm`
+/// siblings. Single source of truth for the DB path (open + size).
+const DB_FILENAME: &str = "echo.sqlite3";
+
 #[tauri::command]
 fn get_day_view(state: State<'_, DbState>, date: String) -> Result<DayView, String> {
     let conn = state.lock().map_err(|e| e.to_string())?;
@@ -168,8 +172,9 @@ fn open_external(url: String) -> Result<(), String> {
 fn storage_size(app: tauri::AppHandle) -> Result<u64, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let mut total = 0u64;
-    for name in ["echo.sqlite3", "echo.sqlite3-wal", "echo.sqlite3-shm"] {
-        if let Ok(meta) = std::fs::metadata(dir.join(name)) {
+    for suffix in ["", "-wal", "-shm"] {
+        let path = dir.join(format!("{DB_FILENAME}{suffix}"));
+        if let Ok(meta) = std::fs::metadata(path) {
             total += meta.len();
         }
     }
@@ -177,9 +182,14 @@ fn storage_size(app: tauri::AppHandle) -> Result<u64, String> {
 }
 
 /// Clear all tracking data (segments + assignments + notes), keeping projects
-/// and ignore rules. Drops the open segment first so the wiped DB stays empty
-/// (the poller opens a fresh one on its next tick); the two locks are taken
-/// sequentially, never nested, preserving lock order current → db.
+/// and ignore rules.
+///
+/// Drops the open segment *before* the wipe rather than holding `current` across
+/// it: `discard_current` empties the slot, so if a poller tick lands in the gap
+/// it finds `None`, writes nothing (only a non-empty slot flushes on close), and
+/// merely opens a fresh in-memory segment — which the following DELETE leaves
+/// untouched. No stale row can survive, and the two locks are taken sequentially
+/// (never nested), keeping lock order current → db.
 #[tauri::command]
 fn clear_tracking_data(
     db: State<'_, DbState>,
@@ -357,7 +367,7 @@ pub fn run() {
         })
         .setup(|app| {
             let dir = app.path().app_data_dir().expect("app data dir");
-            let db_path = dir.join("echo.sqlite3");
+            let db_path = dir.join(DB_FILENAME);
             if let Some(parent) = db_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }

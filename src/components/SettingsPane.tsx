@@ -11,6 +11,11 @@ import { Segmented } from "./Segmented";
 
 type OnOff = "on" | "off";
 
+const ON_OFF_OPTIONS: { value: OnOff; label: string }[] = [
+  { value: "on", label: "On" },
+  { value: "off", label: "Off" },
+];
+
 const BUY_ME_A_COFFEE_URL = "https://buymeacoffee.com/anandpatel";
 const GITHUB_URL = "https://github.com/apat183/echo";
 
@@ -78,38 +83,36 @@ export function SettingsPane(props: { onDataChanged?: () => void }) {
     saveTheme(next);
   }
 
-  async function clearUntagged() {
-    const ok = await ask(
+  // Confirm via native dialog, run the destructive action, then refresh the
+  // size line and let the rest of the app refetch what the clear may have wiped.
+  async function confirmAndRun(title: string, message: string, run: () => Promise<unknown>) {
+    const ok = await ask(message, { title, kind: "warning" });
+    if (!ok) return;
+    await run();
+    refreshSize();
+    onDataChanged?.();
+  }
+
+  const clearUntagged = () =>
+    confirmAndRun(
+      "Clear untagged data?",
       "Delete all activity that isn't assigned to any project? This cannot be undone.",
-      { title: "Clear untagged data?", kind: "warning" }
+      api.clearUntagged
     );
-    if (!ok) return;
-    await api.clearUntagged();
-    refreshSize();
-    onDataChanged?.();
-  }
 
-  async function clearTracking() {
-    const ok = await ask(
+  const clearTracking = () =>
+    confirmAndRun(
+      "Clear all tracking data?",
       "Delete all tracked activity and project assignments? Your projects and ignore rules are kept. This cannot be undone.",
-      { title: "Clear all tracking data?", kind: "warning" }
+      api.clearTrackingData
     );
-    if (!ok) return;
-    await api.clearTrackingData();
-    refreshSize();
-    onDataChanged?.();
-  }
 
-  async function resetEverything() {
-    const ok = await ask(
+  const resetEverything = () =>
+    confirmAndRun(
+      "Reset everything?",
       "Delete everything — all activity, projects, and ignore rules? This cannot be undone.",
-      { title: "Reset everything?", kind: "warning" }
+      api.resetEverything
     );
-    if (!ok) return;
-    await api.resetEverything();
-    refreshSize();
-    onDataChanged?.();
-  }
 
   return (
     <>
@@ -208,10 +211,7 @@ export function SettingsPane(props: { onDataChanged?: () => void }) {
             <div className="settings-row-control">
               <Segmented
                 value={autodelete.enabled ? "on" : "off"}
-                options={[
-                  { value: "on" as OnOff, label: "On" },
-                  { value: "off" as OnOff, label: "Off" },
-                ]}
+                options={ON_OFF_OPTIONS}
                 onChange={(v) => saveAutodelete(v === "on", autodelete.days)}
               />
             </div>
@@ -254,10 +254,7 @@ export function SettingsPane(props: { onDataChanged?: () => void }) {
             <div className="settings-row-control">
               <Segmented
                 value={launchAtLogin ? "on" : "off"}
-                options={[
-                  { value: "on" as OnOff, label: "On" },
-                  { value: "off" as OnOff, label: "Off" },
-                ]}
+                options={ON_OFF_OPTIONS}
                 onChange={(v) => void changeLaunchAtLogin(v === "on")}
               />
             </div>
