@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api, type Project } from "./api";
 import type { DragPayload } from "./drag";
 import { Sidebar, type Selection } from "./components/Sidebar";
 import { DayPane } from "./components/DayPane";
 import { ProjectPane } from "./components/ProjectPane";
 import { IgnoredPane } from "./components/IgnoredPane";
+import { SettingsPane } from "./components/SettingsPane";
 import "./App.css";
 
 export default function App() {
@@ -58,6 +60,14 @@ export default function App() {
     refreshProjects();
   }, [refreshProjects]);
 
+  // The tray "Settings…" item shows the window and asks the UI to open Settings.
+  useEffect(() => {
+    const unlisten = listen("show-settings", () => setSelection({ kind: "settings" }));
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, []);
+
   return (
     <div className="app">
       <Sidebar
@@ -80,6 +90,8 @@ export default function App() {
           />
         ) : selection.kind === "ignored" ? (
           <IgnoredPane refreshKey={ignoredVersion} onChanged={handleIgnoredChanged} />
+        ) : selection.kind === "settings" ? (
+          <SettingsPane />
         ) : (
           <ProjectPane
             project={projects.find((p) => p.id === selection.id)}

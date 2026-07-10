@@ -5,6 +5,8 @@
 //!   ─────────────────────
 //!   Pause time tracking    (toggles to "Resume time tracking")
 //!   Open Echo
+//!   Settings…
+//!   Check for Updates…
 //!   ─────────────────────
 //!   Quit Echo
 //!
@@ -17,7 +19,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 pub struct TrayHandles {
     tray: TrayIcon,
@@ -32,6 +34,7 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
     let today_item = MenuItem::with_id(app, "today", "Today: 0m", false, None::<&str>)?;
     let pause_item = MenuItem::with_id(app, "pause", "Pause time tracking", true, None::<&str>)?;
     let open_item = MenuItem::with_id(app, "open", "Open Echo", true, None::<&str>)?;
+    let settings_item = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let update_item = MenuItem::with_id(app, "update", "Check for Updates…", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit Echo", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
@@ -43,6 +46,7 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
             &sep1,
             &pause_item,
             &open_item,
+            &settings_item,
             &update_item,
             &sep2,
             &quit_item,
@@ -74,6 +78,7 @@ fn on_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
         "pause" => toggle_pause(app),
         "open" => open_window(app),
+        "settings" => open_settings(app),
         "update" => crate::updater::on_tray_clicked(app),
         "quit" => app.exit(0), // flush happens in RunEvent::Exit (lib.rs)
         _ => {}
@@ -105,7 +110,13 @@ fn toggle_pause(app: &AppHandle) {
 }
 
 fn open_window(app: &AppHandle) {
-    // Back into the dock / Cmd-Tab before showing, for proper focus.
+    show_main(app);
+}
+
+/// Bring the main window to the foreground: back into the dock / Cmd-Tab
+/// (so focus works), then unminimize/show/focus. Shared by "Open Echo" and
+/// "Settings…".
+fn show_main(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     if let Some(window) = app.get_webview_window("main") {
@@ -113,6 +124,12 @@ fn open_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// "Settings…": show the window, then ask the frontend to open the Settings pane.
+fn open_settings(app: &AppHandle) {
+    show_main(app);
+    let _ = app.emit("show-settings", ());
 }
 
 /// Called from the updater as its state changes. Renames the update menu item

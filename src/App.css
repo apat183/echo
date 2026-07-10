@@ -202,11 +202,13 @@ body {
 }
 
 .ignore-target,
+.settings-nav,
 .collapse-nav {
   color: var(--text-dim);
 }
 
 .ignore-icon,
+.settings-icon,
 .collapse-icon {
   width: 22px;
   height: 22px;
@@ -220,11 +222,13 @@ body {
 
 .ignore-target.drop-over .ignore-icon,
 .ignore-target:hover .ignore-icon,
+.settings-nav:hover .settings-icon,
 .collapse-nav:hover .collapse-icon {
   color: var(--text);
 }
 
 .sidebar.collapsed .ignore-icon,
+.sidebar.collapsed .settings-icon,
 .sidebar.collapsed .collapse-icon {
   width: 30px;
   height: 30px;
@@ -1146,7 +1150,8 @@ body {
   color: var(--text-dim);
 }
 
-.ignore-pane-icon {
+.ignore-pane-icon,
+.settings-pane-icon {
   width: 22px;
   height: 22px;
   border-radius: 6px;
@@ -1155,6 +1160,69 @@ body {
   justify-content: center;
   background: var(--hover);
   color: var(--text-dim);
+}
+
+/* ---- settings pane ---- */
+
+.settings-title {
+  color: var(--text-dim);
+}
+
+.settings-section {
+  margin-bottom: 30px;
+}
+
+.settings-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 12px;
+}
+
+.settings-placeholder {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 0;
+}
+
+/* A settings row: a label/description on the left, a control on the right. */
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-row:last-child {
+  border-bottom: none;
+}
+
+.settings-row-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings-row-label {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.settings-row-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.settings-row-control {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .ignored-rule-row {
