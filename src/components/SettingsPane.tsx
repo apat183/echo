@@ -5,9 +5,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { Coffee, ExternalLink, Monitor, Moon, Settings, Sun } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { api, fmtBytes } from "../api";
+import { api, fmtBytes, type AutodeleteConfig } from "../api";
 import { applyTheme, loadTheme, saveTheme, type Theme } from "../theme";
 import { Segmented } from "./Segmented";
+
+type OnOff = "on" | "off";
 
 const BUY_ME_A_COFFEE_URL = "https://buymeacoffee.com/anandpatel";
 const GITHUB_URL = "https://github.com/apat183/echo";
@@ -18,6 +20,8 @@ export function SettingsPane(props: { onDataChanged?: () => void }) {
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const [version, setVersion] = useState<string | null>(null);
   const [size, setSize] = useState<number | null>(null);
+  const [autodelete, setAutodelete] = useState<AutodeleteConfig>({ enabled: false, days: 30 });
+  const [daysText, setDaysText] = useState("30");
 
   const refreshSize = useCallback(() => {
     api.storageSize().then(setSize).catch(() => setSize(null));
@@ -30,6 +34,27 @@ export function SettingsPane(props: { onDataChanged?: () => void }) {
   useEffect(() => {
     refreshSize();
   }, [refreshSize]);
+
+  useEffect(() => {
+    api
+      .getAutodeleteConfig()
+      .then((cfg) => {
+        setAutodelete(cfg);
+        setDaysText(String(cfg.days));
+      })
+      .catch(() => {});
+  }, []);
+
+  function saveAutodelete(enabled: boolean, days: number) {
+    setAutodelete({ enabled, days });
+    void api.setAutodeleteConfig(enabled, days).catch(() => {});
+  }
+
+  function commitDays() {
+    const days = Math.max(1, Math.floor(Number(daysText)) || 1);
+    setDaysText(String(days));
+    saveAutodelete(autodelete.enabled, days);
+  }
 
   function changeTheme(next: Theme) {
     setTheme(next);
@@ -157,6 +182,48 @@ export function SettingsPane(props: { onDataChanged?: () => void }) {
               </button>
             </div>
           </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <span className="settings-row-label">Auto-delete untagged data</span>
+              <span className="settings-row-hint">
+                Periodically remove untagged activity older than the window below.
+              </span>
+            </div>
+            <div className="settings-row-control">
+              <Segmented
+                value={autodelete.enabled ? "on" : "off"}
+                options={[
+                  { value: "on" as OnOff, label: "On" },
+                  { value: "off" as OnOff, label: "Off" },
+                ]}
+                onChange={(v) => saveAutodelete(v === "on", autodelete.days)}
+              />
+            </div>
+          </div>
+          {autodelete.enabled && (
+            <div className="settings-row">
+              <div className="settings-row-copy">
+                <span className="settings-row-label">Keep untagged for</span>
+                <span className="settings-row-hint">
+                  Untagged activity older than this is purged on next launch and every 12h.
+                </span>
+              </div>
+              <div className="settings-row-control">
+                <input
+                  type="number"
+                  min={1}
+                  className="settings-days-input"
+                  value={daysText}
+                  onChange={(e) => setDaysText(e.target.value)}
+                  onBlur={commitDays}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                  }}
+                />
+                <span className="settings-days-unit">days</span>
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="settings-section">

@@ -54,6 +54,9 @@ export type ProjectPeriodNote = {
   note: string;
 };
 
+// Mirrors `AutodeleteConfig` in src-tauri/src/db.rs; keep the two in sync.
+export type AutodeleteConfig = { enabled: boolean; days: number };
+
 // Mirrors `UpdateStatus` in src-tauri/src/updater.rs; keep the two in sync.
 export type UpdateStatus =
   | { state: "idle" }
@@ -109,6 +112,9 @@ export const api = {
   clearTrackingData: () => invoke<void>("clear_tracking_data"),
   clearUntagged: () => invoke<number>("clear_untagged"),
   resetEverything: () => invoke<void>("reset_everything"),
+  getAutodeleteConfig: () => invoke<AutodeleteConfig>("get_autodelete_config"),
+  setAutodeleteConfig: (enabled: boolean, days: number) =>
+    invoke<void>("set_autodelete_config", { enabled, days }),
   updateStatus: () => invoke<UpdateStatus>("update_status"),
   installUpdate: () => invoke<void>("install_update"),
 };

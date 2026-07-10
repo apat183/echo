@@ -209,6 +209,21 @@ fn reset_everything(
     db::reset_everything(&conn).map_err(|e| e.to_string())
 }
 
+/// The saved auto-delete-untagged config (enabled + day window).
+#[tauri::command]
+fn get_autodelete_config(db: State<'_, DbState>) -> Result<db::AutodeleteConfig, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    db::get_autodelete_config(&conn).map_err(|e| e.to_string())
+}
+
+/// Persist the auto-delete config. The scheduler re-reads it each run, so a
+/// change takes effect without a restart.
+#[tauri::command]
+fn set_autodelete_config(db: State<'_, DbState>, enabled: bool, days: u32) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    db::set_autodelete_config(&conn, enabled, days).map_err(|e| e.to_string())
+}
+
 /// Snapshot of the auto-update state machine; polled by the frontend banner.
 #[tauri::command]
 fn update_status(state: State<'_, Arc<updater::UpdaterState>>) -> updater::UpdateStatus {
@@ -289,6 +304,32 @@ fn platform_app_icon_data_url(_bundle_id: &str) -> Option<String> {
     None
 }
 
+/// Auto-delete scheduler: purge untagged segments older than the configured
+/// window once at startup (if enabled) and every 12h after. Config is re-read
+/// each run, so toggling takes effect without a restart. Unlike the updater's
+/// check, this runs in debug builds too so it can be exercised in `tauri dev`.
+fn spawn_autodelete(app: tauri::AppHandle) {
+    use std::time::Duration;
+    const INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
+    std::thread::spawn(move || loop {
+        run_autodelete(&app);
+        std::thread::sleep(INTERVAL);
+    });
+}
+
+fn run_autodelete(app: &tauri::AppHandle) {
+    let db = app.state::<DbState>();
+    let Ok(conn) = db.lock() else { return };
+    let Ok(cfg) = db::get_autodelete_config(&conn) else {
+        return;
+    };
+    if cfg.enabled {
+        // Only touches segments older than the window; the open segment (start =
+        // now) is never in range, so `current` needs no involvement.
+        let _ = db::purge_untagged_older_than(&conn, cfg.days);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -331,6 +372,8 @@ pub fn run() {
             app.manage(Arc::new(updater::UpdaterState::default()));
             updater::spawn_periodic_check(app.handle().clone());
 
+            spawn_autodelete(app.handle().clone());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -361,6 +404,8 @@ pub fn run() {
             clear_tracking_data,
             clear_untagged,
             reset_everything,
+            get_autodelete_config,
+            set_autodelete_config,
             update_status,
             install_update,
         ])
