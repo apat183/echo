@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_tag: ${{ steps.release.outputs.release_tag }}
+      app_version: ${{ steps.release.outputs.app_version }}
 
     steps:
       - name: Checkout
@@ -26,15 +27,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_NOTES: |
-            Automated unsigned Echo build for this commit.
+            Automated Echo build for this commit.
 
-            Downloads are ad-hoc signed and not notarized, so macOS may require manual approval before first launch.
+            Signed with a Developer ID certificate and notarized by Apple, so it
+            launches without Gatekeeper warnings. Installed copies update
+            themselves in place via the in-app updater. On first launch, grant
+            Echo the Accessibility permission (System Settings → Privacy &
+            Security → Accessibility) so it can read window titles.
         run: |
           set -euo pipefail
 
-          short_sha="${GITHUB_SHA::7}"
-          release_tag="build-${short_sha}"
-          release_name="Echo ${release_tag}"
+          # The updater compares semver, so every release needs a monotonically
+          # increasing version. run_number is stable across re-runs of the same
+          # run, keeping the tag-reuse guard below valid.
+          app_version="0.1.${GITHUB_RUN_NUMBER}"
+          release_tag="v${app_version}"
+          release_name="Echo ${app_version}"
 
           git fetch --tags origin
 
@@ -50,10 +58,11 @@ jobs:
           fi
 
           # Create/refresh the release as a DRAFT. The publish_release job
-          # promotes it to published + latest only after both DMGs upload, so a
-          # failed or partial build never leaves an empty "latest" release. The
-          # edit path intentionally leaves draft/latest state untouched (a re-run
-          # over an already-published release must not un-publish it).
+          # promotes it to published + latest only after the build uploads and
+          # latest.json is attached, so a failed or partial build never leaves
+          # an empty "latest" release. The edit path intentionally leaves
+          # draft/latest state untouched (a re-run over an already-published
+          # release must not un-publish it).
           if gh release view "$release_tag" >/dev/null 2>&1; then
             gh release edit "$release_tag" \
               --title "$release_name" \
@@ -67,19 +76,12 @@ jobs:
           fi
 
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "app_version=${app_version}" >> "$GITHUB_OUTPUT"
 
   macos:
-    name: Build macOS ${{ matrix.target }}
+    name: Build macOS aarch64
     needs: prepare_release
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-latest
-            target: aarch64-apple-darwin
-          - runner: macos-13
-            target: x86_64-apple-darwin
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
@@ -88,12 +90,12 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -103,40 +105,101 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build DMG
+      # Decode the App Store Connect API key (.p8) that Tauri hands to
+      # notarytool. It's stored base64 because it's a multi-line file; the
+      # runner VM is ephemeral, so the decoded key dies with the job.
+      - name: Write notary API key
         env:
-          APPLE_SIGNING_IDENTITY: "-"
-        run: bun run tauri build --target ${{ matrix.target }} --bundles dmg
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          echo "$APPLE_API_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
 
-      - name: Upload DMG to release
+      # `app` must be in --bundles: the updater's .app.tar.gz + .sig are only
+      # produced for the app bundle, not the dmg. createUpdaterArtifacts and the
+      # CI version are injected here (not committed) so local builds stay 0.1.0
+      # and never need the signing key.
+      #
+      # With the Apple env below, Tauri imports the Developer ID cert into a
+      # temporary keychain, signs with hardened runtime, notarizes via the App
+      # Store Connect API key, and staples the ticket to the .app and .dmg — so
+      # the DMG install and the in-place updater swap both launch without a
+      # Gatekeeper prompt, and the stable Developer ID identity lets macOS keep
+      # the Accessibility grant across updates.
+      - name: Build DMG + updater artifacts
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          APP_VERSION: ${{ needs.prepare_release.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          bun run tauri build --target aarch64-apple-darwin --bundles app,dmg \
+            --config "{\"version\":\"${APP_VERSION}\",\"bundle\":{\"createUpdaterArtifacts\":true}}"
+
+      - name: Upload artifacts to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.prepare_release.outputs.release_tag }}
-          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
 
-          dmgs=()
-          while IFS= read -r dmg; do
-            dmgs+=("$dmg")
-          done < <(find src-tauri/target -path "*/bundle/dmg/*.dmg" -type f -print | sort)
+          assets=()
+          while IFS= read -r f; do
+            assets+=("$f")
+          done < <(find src-tauri/target/aarch64-apple-darwin/release/bundle \
+            \( -path "*/dmg/*.dmg" -o -path "*/macos/*.app.tar.gz" -o -path "*/macos/*.app.tar.gz.sig" \) \
+            -type f -print | sort)
 
-          if [ "${#dmgs[@]}" -eq 0 ]; then
-            echo "No DMG files found for ${TARGET}."
+          if [ "${#assets[@]}" -lt 3 ]; then
+            echo "Expected dmg + app.tar.gz + sig, found: ${assets[*]:-none}"
             exit 1
           fi
 
-          gh release upload "$RELEASE_TAG" "${dmgs[@]}" --clobber
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
 
   publish_release:
     name: Publish GitHub Release
-    # Runs only if every macos matrix leg succeeded (fail-fast: false means a
-    # single failed arch fails this job, so publish is skipped and the release
-    # stays a draft with whatever uploaded — never a broken public "latest").
+    # Runs only if the build job succeeded, so publish is skipped on failure
+    # and the release stays a draft — never a broken public "latest".
     needs: [prepare_release, macos]
     runs-on: ubuntu-latest
 
     steps:
+      # latest.json is what installed apps poll via
+      # releases/latest/download/latest.json; it must be attached before the
+      # draft flips public so the endpoint never serves a release without it.
+      - name: Compose and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare_release.outputs.release_tag }}
+          APP_VERSION: ${{ needs.prepare_release.outputs.app_version }}
+        run: |
+          set -euo pipefail
+
+          tmp="$(mktemp -d)"
+          gh release download "$RELEASE_TAG" --pattern 'Echo.app.tar.gz.sig' --dir "$tmp"
+
+          jq -n \
+            --arg version "$APP_VERSION" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg url "https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}/Echo.app.tar.gz" \
+            --arg sig "$(cat "$tmp/Echo.app.tar.gz.sig")" \
+            '{
+              version: $version,
+              notes: "Automated Echo build.",
+              pub_date: $pub_date,
+              platforms: { "darwin-aarch64": { signature: $sig, url: $url } }
+            }' > "$tmp/latest.json"
+
+          gh release upload "$RELEASE_TAG" "$tmp/latest.json" --clobber
+
       - name: Promote draft to latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Calendar, CalendarDays, CalendarRange, ChevronLeft, ChevronRight } from "lucide-react";
-import { api, appColor, fmtDur, initials, type Project, toDateStr } from "../api";
+import { api, appColor, fmtDur, initials, type Project, toDateStr, type UpdateStatus } from "../api";
 import { type DragPayload, startDrag } from "../drag";
 import { mergeDayViews, partitionTitles, type PeriodAppUsage, type PeriodTitleUsage, type PeriodView, type RowProject } from "../merge";
 import { type Granularity, periodDates, periodLabel, samePeriod, shiftPeriod } from "../period";
@@ -23,11 +23,24 @@ export function DayPane(props: {
   const [gran, setGran] = useState<Granularity>("day");
   const [view, setView] = useState<PeriodView | null>(null);
   const [axOk, setAxOk] = useState(true); // assume ok until checked, to avoid a flash
+  const [update, setUpdate] = useState<UpdateStatus>({ state: "idle" });
 
   // Poll Accessibility status so the banner disappears once granted.
   useEffect(() => {
     let alive = true;
     const check = () => api.axStatus().then((ok) => alive && setAxOk(ok)).catch(() => {});
+    check();
+    const id = setInterval(check, 3000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  // Poll the updater state machine; also drives download progress.
+  useEffect(() => {
+    let alive = true;
+    const check = () => api.updateStatus().then((s) => alive && setUpdate(s)).catch(() => {});
     check();
     const id = setInterval(check, 3000);
     return () => {
@@ -91,21 +104,37 @@ export function DayPane(props: {
       </header>
 
       <div className="pane-body">
+        {update.state !== "idle" && <UpdateBanner update={update} />}
         {!axOk && (
           <div className="ax-banner">
-            <span>
-              Enable <strong>window titles</strong> to break apps down by document &amp; tab.
-            </span>
-            <button
-              type="button"
-              className="ax-grant"
-              onClick={async () => {
-                await api.axRequest();
-                setAxOk(await api.axStatus());
-              }}
-            >
-              Grant Accessibility…
-            </button>
+            <div className="banner-text">
+              <span>
+                Enable <strong>window titles</strong> to break apps down by document &amp; tab.
+              </span>
+              <span className="banner-hint">
+                Just updated? macOS may still show Echo as enabled while blocking it — open
+                Settings and toggle Echo off and on in the Accessibility list.
+              </span>
+            </div>
+            <div className="banner-actions">
+              <button
+                type="button"
+                className="ax-grant"
+                onClick={async () => {
+                  await api.axRequest();
+                  setAxOk(await api.axStatus());
+                }}
+              >
+                Grant Accessibility…
+              </button>
+              <button
+                type="button"
+                className="ax-grant secondary"
+                onClick={() => api.axOpenSettings().catch(() => {})}
+              >
+                Open Settings
+              </button>
+            </div>
           </div>
         )}
         <h1 className="usage-total">{view ? fmtDur(view.total_seconds) : "—"}</h1>
@@ -137,6 +166,75 @@ export function DayPane(props: {
       </div>
     </>
   );
+}
+
+/** Auto-update banner: available → downloading → installing (then the app
+ * restarts itself); errors offer a retry. Driven by the update_status poll. */
+function UpdateBanner(props: { update: UpdateStatus }) {
+  const { update } = props;
+  // Fire-and-forget: on success the app restarts before this resolves, and
+  // failures surface through the polled status, not the rejected promise.
+  const install = () => api.installUpdate().catch(() => {});
+  switch (update.state) {
+    case "available":
+      return (
+        <div className="ax-banner update-banner">
+          <div className="banner-text">
+            <span>
+              Echo <strong>{update.version}</strong> is available.
+            </span>
+            <span className="banner-hint">
+              Updating replaces the app, so macOS will need Accessibility re-enabled afterwards.
+            </span>
+          </div>
+          <div className="banner-actions">
+            <button type="button" className="ax-grant" onClick={install}>
+              Restart &amp; Update
+            </button>
+          </div>
+        </div>
+      );
+    case "downloading": {
+      const progress =
+        update.total !== null
+          ? `${Math.min(100, Math.round((update.downloaded / update.total) * 100))}%`
+          : `${(update.downloaded / (1024 * 1024)).toFixed(1)} MB`;
+      return (
+        <div className="ax-banner update-banner">
+          <div className="banner-text">
+            <span>
+              Downloading Echo <strong>{update.version}</strong>… {progress}
+            </span>
+          </div>
+        </div>
+      );
+    }
+    case "installing":
+      return (
+        <div className="ax-banner update-banner">
+          <div className="banner-text">
+            <span>
+              Installing Echo <strong>{update.version}</strong> — the app will restart…
+            </span>
+          </div>
+        </div>
+      );
+    case "error":
+      return (
+        <div className="ax-banner update-banner">
+          <div className="banner-text">
+            <span>Update failed: {update.message}</span>
+          </div>
+          <div className="banner-actions">
+            <button type="button" className="ax-grant" onClick={install}>
+              Retry
+            </button>
+          </div>
+        </div>
+      );
+    default:
+      return null;
+  }
 }
 
 /** Colored dots for the projects a row is explicitly linked to (click to unassign). */
