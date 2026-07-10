@@ -236,7 +236,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
-            // Red close button = hide to the menu bar, keep tracking (spec §2).
+            // Red close button = hide to the menu bar, keep tracking.
             // Main window only: the Accessory switch is process-global.
             if window.label() != "main" {
                 return;
@@ -302,7 +302,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             // Single flush point for every exit path (tray Quit, Cmd-Q, …):
-            // the in-progress segment must never be lost (spec §4).
+            // the in-progress segment must never be lost.
             if let tauri::RunEvent::Exit = event {
                 let track = app_handle.state::<Arc<TrackerState>>();
                 let db = app_handle.state::<DbState>();

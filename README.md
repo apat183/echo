@@ -22,6 +22,7 @@ timesheets, billing, clients, rates, or invoices.
 - Day, week, and month project notes. Week views group day notes; month views
   group week notes.
 - Local SQLite storage owned by the app.
+- In-app auto-update: signed, notarized releases update themselves in place.
 
 ![Echo project view](assets/readme/Project.png)
 
@@ -47,13 +48,13 @@ rough edges, schema changes, and macOS-first assumptions.
 
 ## Install
 
-Echo is currently distributed as a private, unsigned macOS build. Download the
-latest `Echo build-<shortsha>` DMG from GitHub Releases, drag Echo into
+Download the latest `Echo <version>` DMG from GitHub Releases, drag Echo into
 Applications, then open it from Finder.
 
-Because the build is unsigned, macOS may require manual approval in System
-Settings before first launch. For a public release, Echo should be Developer ID
-signed and notarized.
+Builds are Developer ID signed and notarized by Apple, so they launch without
+Gatekeeper warnings. On first launch, grant Echo the Accessibility permission
+(System Settings → Privacy & Security → Accessibility) so it can read window
+titles. Installed copies keep themselves up to date via the in-app updater.
 
 ## Development
 
@@ -106,13 +107,15 @@ bun run tauri build --bundles dmg
 
 - `src/` - React UI.
 - `src-tauri/` - Rust shell, tracker, SQLite storage, tray integration, and macOS capture.
-- `.github/workflows/` - CI and automatic unsigned-release automation.
+- `.github/workflows/` - CI and signed-release automation.
 
 ## Release
 
-See `RELEASE.md` for the private unsigned release checklist. Every push to
-`main` publishes a latest GitHub Release named `Echo build-<shortsha>` with macOS
-DMG artifacts.
+See `RELEASE.md` for the release checklist. Every push to `main` builds a
+Developer ID signed and notarized macOS app, tags it `v0.1.<run_number>`, and
+publishes a latest GitHub Release named `Echo <version>` with the DMG plus the
+updater artifacts (`Echo.app.tar.gz`, `.sig`, and `latest.json`) that drive the
+in-app updater.
 
 ## License
 

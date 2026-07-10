@@ -32,6 +32,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Anand Patel",
+    "category": "Productivity",
+    "copyright": "Copyright © 2026 Anand Patel",
+    "shortDescription": "A personal macOS time tracker.",
+    "longDescription": "Echo is a personal, local-only macOS menu-bar time tracker. It records the foreground app and window title, then lets you group that time into projects after the fact.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

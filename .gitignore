@@ -11,6 +11,13 @@ node_modules/
 # dotenv environment variables file
 .env
 
+# signing keys / certificates (never commit these)
+*.p8
+*.pem
+*.key
+*.p12
+*.cer
+
 # .vscode workspace settings file
 .vscode/settings.json
 .vscode/launch.json
@@ -24,12 +31,8 @@ bun.lockb
 # rust compiled folders
 target/
 
-# test video for streaming example
-streaming_example_test_video.mp4
-
-# examples /gen directory
-/examples/**/src-tauri/gen/
-/bench/**/src-tauri/gen/
+# tauri generated files
+src-tauri/gen/
 
 # logs
 logs

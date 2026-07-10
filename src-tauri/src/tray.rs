@@ -1,6 +1,6 @@
 //! Status-bar (tray) icon: menu, handlers, and live "Today" readout.
 //!
-//! Menu layout (spec §1):
+//! Menu layout:
 //!   Today: 4h 12m          (disabled)
 //!   ─────────────────────
 //!   Pause time tracking    (toggles to "Resume time tracking")
