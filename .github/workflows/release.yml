@@ -29,12 +29,11 @@ jobs:
           RELEASE_NOTES: |
             Automated Echo build for this commit.
 
-            Installed copies update themselves via the in-app updater. Downloads
-            are ad-hoc signed and not notarized, so macOS may require manual
-            approval before first launch — and after every update the
-            Accessibility (window titles) permission must be re-enabled by
-            toggling Echo off and on in System Settings → Privacy & Security →
-            Accessibility.
+            Signed with a Developer ID certificate and notarized by Apple, so it
+            launches without Gatekeeper warnings. Installed copies update
+            themselves in place via the in-app updater. On first launch, grant
+            Echo the Accessibility permission (System Settings → Privacy &
+            Security → Accessibility) so it can read window titles.
         run: |
           set -euo pipefail
 
@@ -106,13 +105,35 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      # Decode the App Store Connect API key (.p8) that Tauri hands to
+      # notarytool. It's stored base64 because it's a multi-line file; the
+      # runner VM is ephemeral, so the decoded key dies with the job.
+      - name: Write notary API key
+        env:
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          echo "$APPLE_API_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+
       # `app` must be in --bundles: the updater's .app.tar.gz + .sig are only
       # produced for the app bundle, not the dmg. createUpdaterArtifacts and the
       # CI version are injected here (not committed) so local builds stay 0.1.0
       # and never need the signing key.
+      #
+      # With the Apple env below, Tauri imports the Developer ID cert into a
+      # temporary keychain, signs with hardened runtime, notarizes via the App
+      # Store Connect API key, and staples the ticket to the .app and .dmg — so
+      # the DMG install and the in-place updater swap both launch without a
+      # Gatekeeper prompt, and the stable Developer ID identity lets macOS keep
+      # the Accessibility grant across updates.
       - name: Build DMG + updater artifacts
         env:
-          APPLE_SIGNING_IDENTITY: "-"
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           APP_VERSION: ${{ needs.prepare_release.outputs.app_version }}
