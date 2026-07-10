@@ -59,6 +59,7 @@ body {
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
+  overflow-x: hidden;
   overflow-y: auto;
   transition: width 0.15s ease;
 }
@@ -78,6 +79,7 @@ body {
 .sidebar:not(.collapsed) .sidebar-section,
 .sidebar:not(.collapsed) .add-project,
 .sidebar:not(.collapsed) .sidebar-empty {
+  width: auto;
   margin-left: 4px;
   margin-right: 4px;
 }
