@@ -24,6 +24,12 @@ Echo is free and personal. If it saves you time, you can say thanks:
 - Day, week, and month activity charts with per-app breakdowns.
 - Per-project totals and app/title breakdowns.
 - Drag app or title rows onto projects to assign time.
+- Standing rules that send an app's time to a project on every day, so the same
+  drag never has to be repeated. Rules apply to days already tracked unless you
+  make them forward-only.
+- Take a single day back out of a project without touching the rule behind it.
+- Open any day in a project to see what made up its total and why each line is
+  there.
 - Ignore noisy apps or window titles and restore them later.
 - Day, week, and month project notes. Week views group day notes; month views
   group week notes.

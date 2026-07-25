@@ -11,9 +11,11 @@ import {
   fmtDur,
   initials,
   monthKey,
+  type LinkState,
   type Project,
   type ProjectApp,
   type ProjectPeriodNote,
+  type ReceiptEntry,
   weekKey,
 } from "../api";
 import { bucketLabel, rollup, type Bucket, type Granularity } from "../period";
@@ -64,16 +66,16 @@ export function ProjectPane(props: { project?: Project; onAssignmentChange: () =
 
   async function removeProjectApp(app: ProjectApp) {
     if (projectId == null) return;
-    if (!window.confirm(`Remove ${app.app_name} from this project?`)) return;
-    await api.removeProjectAppAssignments(projectId, app.app_key);
+    if (!window.confirm(removalPrompt(app.app_name, app.state))) return;
+    await api.removeFromProject(projectId, app.app_key, null);
     await load();
     onAssignmentChange();
   }
 
-  async function removeProjectTitle(app: ProjectApp, title: string) {
+  async function removeProjectTitle(app: ProjectApp, title: string, state: LinkState) {
     if (projectId == null) return;
-    if (!window.confirm(`Remove ${title} from this project?`)) return;
-    await api.removeProjectTitleAssignments(projectId, app.app_key, title);
+    if (!window.confirm(removalPrompt(title, state))) return;
+    await api.removeFromProject(projectId, app.app_key, title);
     await load();
     onAssignmentChange();
   }
@@ -116,7 +118,7 @@ export function ProjectPane(props: { project?: Project; onAssignmentChange: () =
                 color={project.color}
                 max={appsMax}
                 onRemoveApp={removeProjectApp}
-                onRemoveTitle={(title) => removeProjectTitle(a, title)}
+                onRemoveTitle={(title, state) => removeProjectTitle(a, title, state)}
               />
             ))}
           </div>
@@ -137,6 +139,11 @@ export function ProjectPane(props: { project?: Project; onAssignmentChange: () =
               rows={rows}
               maxSeconds={buckets[0].seconds}
               color={project.color}
+              projectId={project.id}
+              onAssignmentChange={async () => {
+                await load();
+                onAssignmentChange();
+              }}
               noteByKey={noteByKey}
               onSaveNote={savePeriodNote}
             />
@@ -213,8 +220,10 @@ function PeriodBucketRow(props: {
   rows: DayTotal[];
   maxSeconds: number;
   color: string;
+  projectId: number;
   noteByKey: Map<string, string>;
   onSaveNote: (gran: Granularity, key: string, text: string) => void;
+  onAssignmentChange: () => void;
 }) {
   const { bucket, gran, rows, maxSeconds, color, noteByKey, onSaveNote } = props;
   const [expanded, setExpanded] = useState(false);
@@ -222,19 +231,22 @@ function PeriodBucketRow(props: {
     () => childNoteRows(bucket.key, gran, rows, noteByKey),
     [bucket.key, gran, rows, noteByKey]
   );
-  const hasChildren = children.length > 0;
+  // A day bucket has no child periods, but it can still be opened — that is
+  // where its receipt lives.
+  const isDay = gran === "day";
+  const canExpand = children.length > 0 || isDay;
 
   return (
     <div className="period-bucket">
       <div className="bucket-row">
         <button
           type="button"
-          className={`disclosure ${hasChildren ? "" : "empty"}`}
-          tabIndex={hasChildren ? 0 : -1}
-          aria-label={expanded ? "Collapse notes" : "Expand notes"}
-          onClick={() => hasChildren && setExpanded((v) => !v)}
+          className={`disclosure ${canExpand ? "" : "empty"}`}
+          tabIndex={canExpand ? 0 : -1}
+          aria-label={expanded ? `Collapse ${bucket.label}` : `Expand ${bucket.label}`}
+          onClick={() => canExpand && setExpanded((v) => !v)}
         >
-          {hasChildren ? (expanded ? "▾" : "▸") : ""}
+          {canExpand ? (expanded ? "▾" : "▸") : ""}
         </button>
         <span className="bucket-label">{bucket.label}</span>
         <span className="bucket-bar-wrap">
@@ -257,24 +269,70 @@ function PeriodBucketRow(props: {
         />
       </div>
 
-      {expanded && (
+      {expanded && isDay && (
+        <DayReceipt
+          projectId={props.projectId}
+          date={bucket.key}
+          onChanged={props.onAssignmentChange}
+        />
+      )}
+
+      {expanded && children.length > 0 && (
         <div className="period-child-list">
           {children.map((child) => (
-            <div className="period-child-row" key={`${child.gran}:${child.key}`}>
-              <span className="period-child-label">{child.label}</span>
-              <span className="period-child-time">
-                {child.seconds > 0 ? fmtDur(child.seconds) : ""}
-              </span>
-              <div className="period-child-note">
-                <PeriodNote
-                  note={noteFor(noteByKey, child.gran, child.key)}
-                  placeholder={`Add ${child.gran} note...`}
-                  onSave={(text) => onSaveNote(child.gran, child.key, text)}
-                />
-              </div>
-            </div>
+            <ChildPeriodRow
+              key={`${child.gran}:${child.key}`}
+              child={child}
+              projectId={props.projectId}
+              noteByKey={noteByKey}
+              onSaveNote={onSaveNote}
+              onAssignmentChange={props.onAssignmentChange}
+            />
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+/** A day (or week) inside an expanded bucket: its note, plus its own receipt. */
+function ChildPeriodRow(props: {
+  child: { gran: Granularity; key: string; label: string; seconds: number };
+  projectId: number;
+  noteByKey: Map<string, string>;
+  onSaveNote: (gran: Granularity, key: string, text: string) => void;
+  onAssignmentChange: () => void;
+}) {
+  const { child, projectId, noteByKey, onSaveNote, onAssignmentChange } = props;
+  const [open, setOpen] = useState(false);
+  const isDay = child.gran === "day";
+
+  return (
+    <div className="period-child-block">
+      <div className="period-child-row">
+        <button
+          type="button"
+          className={`disclosure ${isDay ? "" : "empty"}`}
+          tabIndex={isDay ? 0 : -1}
+          aria-label={open ? `Collapse ${child.label}` : `Expand ${child.label}`}
+          onClick={() => isDay && setOpen((v) => !v)}
+        >
+          {isDay ? (open ? "▾" : "▸") : ""}
+        </button>
+        <span className="period-child-label">{child.label}</span>
+        <span className="period-child-time">
+          {child.seconds > 0 ? fmtDur(child.seconds) : ""}
+        </span>
+        <div className="period-child-note">
+          <PeriodNote
+            note={noteFor(noteByKey, child.gran, child.key)}
+            placeholder={`Add ${child.gran} note...`}
+            onSave={(text) => onSaveNote(child.gran, child.key, text)}
+          />
+        </div>
+      </div>
+      {open && isDay && (
+        <DayReceipt projectId={projectId} date={child.key} onChanged={onAssignmentChange} />
       )}
     </div>
   );
@@ -333,7 +391,7 @@ function ProjectAppRow(props: {
   color: string;
   max: number;
   onRemoveApp: (app: ProjectApp) => void;
-  onRemoveTitle: (title: string) => void;
+  onRemoveTitle: (title: string, state: LinkState) => void;
 }) {
   const { app, color, max, onRemoveApp, onRemoveTitle } = props;
   const [icon, setIcon] = useState<string | null>(null);
@@ -381,6 +439,11 @@ function ProjectAppRow(props: {
           />
         </span>
         <span className="bucket-time">{fmtDur(app.seconds)}</span>
+        {app.state === "rule" && (
+          <span className="project-row-rule" title="A rule puts this app in the project">
+            rule
+          </span>
+        )}
         <button
           type="button"
           className="icon-btn project-row-remove"
@@ -400,12 +463,20 @@ function ProjectAppRow(props: {
                 <div className="project-title-row">
                   <span className="title-name">{isUntitled ? "Untitled" : t.title}</span>
                   <span className="title-time">{fmtDur(t.seconds)}</span>
-                  {t.can_remove && (
+                  {t.state === "rule" && (
+                    <span className="project-row-rule" title="A rule puts this in the project">
+                      rule
+                    </span>
+                  )}
+                  {/* The untitled row *is* the app-level row, so removing it is
+                      the app's own control above rather than a second one here.
+                      Everything else is removable whatever put it there. */}
+                  {!isUntitled && (
                     <button
                       type="button"
                       className="icon-btn project-row-remove"
                       title="Remove title from project"
-                      onClick={() => onRemoveTitle(t.title)}
+                      onClick={() => onRemoveTitle(t.title, t.state)}
                     >
                       <X size={13} />
                     </button>
@@ -418,4 +489,86 @@ function ProjectAppRow(props: {
       )}
     </div>
   );
+}
+
+/**
+ * The receipt behind one day's total: what made it up, and why each line is
+ * here. After rules, a project can hold time nobody linked by hand, so a day
+ * total needs somewhere to be interrogated. Removing a line takes it out of the
+ * project for that day only — recording an exception if a rule or an app-level
+ * assignment would otherwise put it straight back.
+ */
+function DayReceipt(props: { projectId: number; date: string; onChanged: () => void }) {
+  const { projectId, date, onChanged } = props;
+  const [entries, setEntries] = useState<ReceiptEntry[] | null>(null);
+
+  const load = useCallback(() => {
+    api
+      .projectDayEntries(projectId, date)
+      .then(setEntries)
+      .catch(() => setEntries([]));
+  }, [projectId, date]);
+
+  useEffect(load, [load]);
+
+  async function exclude(entry: ReceiptEntry) {
+    const what = entry.title || entry.app_name;
+    if (!window.confirm(`Remove ${what} from this project on ${date}?`)) return;
+    await api.excludeForDay(date, entry.app_key, entry.title, projectId);
+    load();
+    onChanged();
+  }
+
+  if (entries == null) return <div className="receipt-list empty">Loading…</div>;
+  if (entries.length === 0) {
+    return <div className="receipt-list empty">Nothing in this project on {date}.</div>;
+  }
+
+  return (
+    <div className="receipt-list">
+      {entries.map((e) => (
+        <div className="receipt-row" key={`${e.app_key}\u0000${e.title}`}>
+          <span className="receipt-app">{e.app_name}</span>
+          <span className="receipt-title">{e.title || "Untitled"}</span>
+          <span className="receipt-why" title={receiptReason(e)}>
+            {e.state === "direct" ? "assigned" : e.state === "rule" ? "rule" : "inherited"}
+          </span>
+          <span className="receipt-time">{fmtDur(e.seconds)}</span>
+          <button
+            type="button"
+            className="icon-btn project-row-remove"
+            title={`Remove from this project on ${date}`}
+            onClick={() => exclude(e)}
+          >
+            <X size={13} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function receiptReason(entry: ReceiptEntry): string {
+  switch (entry.state) {
+    case "direct":
+      return "You assigned this on this day.";
+    case "rule":
+      return "A standing rule puts this in the project.";
+    default:
+      return "Covered by an app-level assignment on this day.";
+  }
+}
+
+/** Removal is permanent and has no undo, so the prompt says what will actually
+ *  happen — a rule-covered row is excluded day by day and the rule itself stays
+ *  put, which is a different thing from deleting the rule. */
+function removalPrompt(what: string, state: LinkState): string {
+  if (state === "rule") {
+    return (
+      `Remove ${what} from this project?\n\n` +
+      `A rule puts it here, so each affected day is excluded individually and ` +
+      `the rule itself stays. To stop it for good, delete the rule under Rules.`
+    );
+  }
+  return `Remove ${what} from this project?`;
 }

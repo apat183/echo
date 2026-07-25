@@ -3,10 +3,22 @@ import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 
 export type Project = { id: number; name: string; color: string };
 
+// Mirrors `LinkState` in src-tauri/src/db.rs; keep the two in sync.
+// "inherited" belongs to the project view (folded rows and per-day receipts);
+// activity rows render inheritance by absence and never carry it.
+export type LinkState = "direct" | "rule" | "inherited" | "excluded";
+
+// Mirrors `RowProject` in src-tauri/src/db.rs; keep the two in sync.
+export type RowProject = {
+  project_id: number;
+  state: LinkState;
+  rule_id: number | null;
+};
+
 export type TitleUsage = {
   title: string; // "" = untitled
   seconds: number;
-  project_ids: number[]; // explicit (app,title) links; empty = inherits app-level
+  projects: RowProject[]; // the title's OWN standing; empty = inherits app-level
 };
 
 export type AppUsage = {
@@ -15,7 +27,7 @@ export type AppUsage = {
   bundle_id: string | null;
   seconds: number;
   hours: number[]; // length 24
-  project_ids: number[]; // app-level (title="") links; empty = unassigned
+  projects: RowProject[]; // what the app-level row itself says
   titles: TitleUsage[];
 };
 
@@ -35,10 +47,39 @@ export type IgnoredEntry = {
   created_at: number;
 };
 
+// Mirrors `TrackedApp` in src-tauri/src/db.rs; keep the two in sync.
+export type TrackedApp = {
+  app_key: string;
+  app_name: string;
+  bundle_id: string | null;
+  seconds: number;
+};
+
+// Mirrors `AssignmentRule` in src-tauri/src/db.rs; keep the two in sync.
+export type AssignmentRule = {
+  id: number;
+  project_id: number;
+  app_key: string;
+  app_name: string | null;
+  effective_from: string | null; // null = reaches all history
+};
+
+// Mirrors `ReceiptEntry` in src-tauri/src/db.rs; keep the two in sync.
+export type ReceiptEntry = {
+  app_key: string;
+  app_name: string;
+  bundle_id: string | null;
+  title: string; // "" = untitled
+  seconds: number;
+  state: LinkState;
+  rule_id: number | null;
+};
+
 export type ProjectTitle = {
   title: string; // "" = untitled
   seconds: number;
-  can_remove: boolean;
+  state: LinkState;
+  rule_id: number | null;
 };
 
 export type ProjectApp = {
@@ -46,6 +87,8 @@ export type ProjectApp = {
   app_name: string;
   bundle_id: string | null;
   seconds: number;
+  state: LinkState;
+  rule_id: number | null;
   titles: ProjectTitle[];
 };
 
@@ -76,10 +119,29 @@ export const api = {
     invoke<void>("add_assignment", { date, appKey, title, projectId }),
   removeAssignment: (date: string, appKey: string, title: string, projectId: number) =>
     invoke<void>("remove_assignment", { date, appKey, title, projectId }),
-  removeProjectAppAssignments: (projectId: number, appKey: string) =>
-    invoke<void>("remove_project_app_assignments", { projectId, appKey }),
-  removeProjectTitleAssignments: (projectId: number, appKey: string, title: string) =>
-    invoke<void>("remove_project_title_assignments", { projectId, appKey, title }),
+  /** Remove an app (or one of its titles) from a project across all days.
+   *  Records exceptions for anything a rule or app-level assignment would
+   *  still bill; resolves to how many days had to be excepted. */
+  removeFromProject: (projectId: number, appKey: string, title: string | null) =>
+    invoke<number>("remove_from_project", { projectId, appKey, title }),
+  trackedApps: () => invoke<TrackedApp[]>("tracked_apps"),
+  listRules: () => invoke<AssignmentRule[]>("list_rules"),
+  createRule: (
+    projectId: number,
+    appKey: string,
+    appName: string | null,
+    effectiveFrom: string | null,
+  ) => invoke<AssignmentRule>("create_rule", { projectId, appKey, appName, effectiveFrom }),
+  deleteRule: (id: number) => invoke<void>("delete_rule", { id }),
+  /** Take a row out of a project for one day; records an Exception only if a
+   *  rule or app-level assignment would otherwise put it straight back. */
+  excludeForDay: (date: string, appKey: string, title: string, projectId: number) =>
+    invoke<void>("exclude_for_day", { date, appKey, title, projectId }),
+  /** Clear a recorded "no", returning the row to Undecided. */
+  removeException: (date: string, appKey: string, title: string, projectId: number) =>
+    invoke<void>("remove_exception", { date, appKey, title, projectId }),
+  projectDayEntries: (projectId: number, date: string) =>
+    invoke<ReceiptEntry[]>("project_day_entries", { projectId, date }),
   addIgnoredEntry: (appKey: string, appName: string | null, title: string) =>
     invoke<void>("add_ignored_entry", { appKey, appName, title }),
   listIgnoredEntries: () => invoke<IgnoredEntry[]>("list_ignored_entries"),

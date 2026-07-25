@@ -70,5 +70,6 @@ TODO.md
 *.njsproj
 *.sln
 *.sw?
-docs/
+docs/*
+!docs/adr/
 .claude/

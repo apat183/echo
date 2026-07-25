@@ -72,26 +72,93 @@ fn remove_assignment(
     db::remove_assignment(&conn, &date, &app_key, &title, project_id).map_err(|e| e.to_string())
 }
 
+/// Remove an app (or one title of it) from a project across all days, writing
+/// exceptions for whatever a rule or app-level assignment would still bill.
+/// Returns the number of days that had to be excepted.
 #[tauri::command]
-fn remove_project_app_assignments(
+fn remove_from_project(
     state: State<'_, DbState>,
     project_id: i64,
     app_key: String,
-) -> Result<(), String> {
+    title: Option<String>,
+) -> Result<usize, String> {
     let conn = state.lock().map_err(|e| e.to_string())?;
-    db::remove_project_app_assignments(&conn, project_id, &app_key).map_err(|e| e.to_string())
+    db::remove_from_project(&conn, project_id, &app_key, title.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn remove_project_title_assignments(
+fn tracked_apps(state: State<'_, DbState>) -> Result<Vec<db::TrackedApp>, String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::tracked_apps(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_rules(state: State<'_, DbState>) -> Result<Vec<db::AssignmentRule>, String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::list_rules(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_rule(
     state: State<'_, DbState>,
     project_id: i64,
     app_key: String,
+    app_name: Option<String>,
+    effective_from: Option<String>,
+) -> Result<db::AssignmentRule, String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::create_rule(
+        &conn,
+        project_id,
+        &app_key,
+        app_name.as_deref(),
+        effective_from.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_rule(state: State<'_, DbState>, id: i64) -> Result<(), String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::delete_rule(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_exception(
+    state: State<'_, DbState>,
+    date: String,
+    app_key: String,
     title: String,
+    project_id: i64,
 ) -> Result<(), String> {
     let conn = state.lock().map_err(|e| e.to_string())?;
-    db::remove_project_title_assignments(&conn, project_id, &app_key, &title)
-        .map_err(|e| e.to_string())
+    db::remove_exception(&conn, &date, &app_key, &title, project_id).map_err(|e| e.to_string())
+}
+
+/// Take a row out of a project for one day: delete any assignment that put it
+/// there, then record an exception only if it would still be inherited from an
+/// app-level assignment or a standing rule (ADR 0002).
+#[tauri::command]
+fn exclude_for_day(
+    state: State<'_, DbState>,
+    date: String,
+    app_key: String,
+    title: String,
+    project_id: i64,
+) -> Result<(), String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::exclude_for_day(&conn, &date, &app_key, &title, project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn project_day_entries(
+    state: State<'_, DbState>,
+    project_id: i64,
+    date: String,
+) -> Result<Vec<db::ReceiptEntry>, String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::project_day_entries(&conn, project_id, &date).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -398,8 +465,14 @@ pub fn run() {
             set_project_order,
             add_assignment,
             remove_assignment,
-            remove_project_app_assignments,
-            remove_project_title_assignments,
+            remove_from_project,
+            tracked_apps,
+            list_rules,
+            create_rule,
+            delete_rule,
+            remove_exception,
+            exclude_for_day,
+            project_day_entries,
             add_ignored_entry,
             list_ignored_entries,
             remove_ignored_entry,

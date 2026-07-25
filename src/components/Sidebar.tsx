@@ -9,7 +9,15 @@ import {
   useRef,
   useState,
 } from "react";
-import { Activity, Ban, PanelLeftClose, PanelLeftOpen, Settings, Trash2 } from "lucide-react";
+import {
+  Activity,
+  Ban,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Settings,
+  Trash2,
+  Wand2,
+} from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api, initials, PROJECT_COLORS, type Project } from "../api";
 import {
@@ -24,6 +32,7 @@ import {
 export type Selection =
   | { kind: "day" }
   | { kind: "ignored" }
+  | { kind: "rules" }
   | { kind: "settings" }
   | { kind: "project"; id: number };
 
@@ -180,6 +189,18 @@ export function Sidebar(props: {
             <Ban size={16} />
           </span>
           {!collapsed && <span>Ignore</span>}
+        </button>
+
+        <button
+          type="button"
+          className={`nav-item rules-nav ${selection.kind === "rules" ? "active" : ""}`}
+          title="Rules"
+          onClick={() => onSelect({ kind: "rules" })}
+        >
+          <span className="settings-icon">
+            <Wand2 size={16} />
+          </span>
+          {!collapsed && <span>Rules</span>}
         </button>
 
         <button
