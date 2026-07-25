@@ -1,8 +1,9 @@
 // Folds several single-day DayViews into one PeriodView for the week/month
-// activity views: app + title time summed, hour buckets added, and the set of
-// days each project link covers preserved (so a dot can unassign just its days).
+// activity views: app + title time summed, hour buckets added, and each
+// project link's days preserved — split by whether the project counted that
+// day or was deliberately excluded, so one dot can act on just the right days.
 
-import type { AppUsage, DayView } from "./api";
+import type { AppUsage, DayView, LinkState, RowProject as DayRowProject } from "./api";
 import {
   addHours,
   emptyHours,
@@ -13,7 +14,22 @@ import {
   type Granularity,
 } from "./period";
 
-export type RowProject = { id: number; dates: string[] };
+/**
+ * One project's standing against a row across a whole period.
+ *
+ * `state` is what to draw. Folding many days into one dot needs a winner, and
+ * it is the most direct thing present: a day you linked by hand outranks a day
+ * a rule covered, which outranks an excluded day. That way clicking the dot
+ * always offers to undo the strongest claim on the row.
+ */
+export type RowProject = {
+  id: number;
+  state: Extract<LinkState, "direct" | "rule" | "excluded">;
+  /** The rule responsible, when one is involved on any day of the period. */
+  ruleId: number | null;
+  includedDates: string[];
+  excludedDates: string[];
+};
 
 export type PeriodChartBucket = {
   key: string;
@@ -29,7 +45,7 @@ export type PeriodTitleUsage = {
   projects: RowProject[]; // explicit title-level links across the period
 };
 
-export type PeriodAppUsage = Omit<AppUsage, "project_ids" | "titles"> & {
+export type PeriodAppUsage = Omit<AppUsage, "projects" | "titles"> & {
   timeline: PeriodChartBucket[];
   dates: string[];
   projects: RowProject[]; // app-level (title="") links across the period
@@ -49,7 +65,13 @@ export function mergeDayViews(
   gran: Granularity,
   anchorDate: string
 ): PeriodView {
-  type TitleAcc = { seconds: number; dates: string[]; datesByProject: Map<number, string[]> };
+  type ProjectAcc = {
+    state: RowProject["state"];
+    ruleId: number | null;
+    includedDates: string[];
+    excludedDates: string[];
+  };
+  type TitleAcc = { seconds: number; dates: string[]; byProject: Map<number, ProjectAcc> };
   type Accumulator = {
     app_key: string;
     app_name: string;
@@ -57,7 +79,7 @@ export function mergeDayViews(
     seconds: number;
     hours: number[];
     dates: string[];
-    datesByProject: Map<number, string[]>; // app-level links
+    byProject: Map<number, ProjectAcc>; // app-level standing
     secondsByDate: Map<string, number>;
     titles: Map<string, TitleAcc>;
   };
@@ -82,7 +104,7 @@ export function mergeDayViews(
           seconds: 0,
           hours: emptyHours(),
           dates: [],
-          datesByProject: new Map<number, string[]>(),
+          byProject: new Map<number, ProjectAcc>(),
           secondsByDate: new Map<string, number>(),
           titles: new Map<string, TitleAcc>(),
         } satisfies Accumulator);
@@ -91,15 +113,17 @@ export function mergeDayViews(
       addHours(entry.hours, app.hours);
       entry.dates.push(day.date);
       entry.secondsByDate.set(day.date, (entry.secondsByDate.get(day.date) ?? 0) + app.seconds);
-      for (const pid of app.project_ids) pushDate(entry.datesByProject, pid, day.date);
+      for (const link of app.projects) foldLink(entry.byProject, link, day.date);
 
       for (const t of app.titles) {
-        const tacc =
-          entry.titles.get(t.title) ??
-          { seconds: 0, dates: [], datesByProject: new Map<number, string[]>() };
+        const tacc = entry.titles.get(t.title) ?? {
+          seconds: 0,
+          dates: [],
+          byProject: new Map<number, ProjectAcc>(),
+        };
         tacc.seconds += t.seconds;
         tacc.dates.push(day.date);
-        for (const pid of t.project_ids) pushDate(tacc.datesByProject, pid, day.date);
+        for (const link of t.projects) foldLink(tacc.byProject, link, day.date);
         entry.titles.set(t.title, tacc);
       }
 
@@ -116,13 +140,13 @@ export function mergeDayViews(
       hours: app.hours,
       timeline: buildTimeline(gran, anchorDate, app.hours, app.secondsByDate),
       dates: [...new Set(app.dates)].sort(),
-      projects: rowProjects(app.datesByProject),
+      projects: rowProjects(app.byProject),
       titles: [...app.titles.entries()]
         .map(([title, t]) => ({
           title,
           seconds: t.seconds,
           dates: [...new Set(t.dates)].sort(),
-          projects: rowProjects(t.datesByProject),
+          projects: rowProjects(t.byProject),
         }))
         .sort((a, b) => b.seconds - a.seconds),
     }))
@@ -165,15 +189,53 @@ function weekdayLabel(dateStr: string): string {
   return new Date(y, m - 1, d).toLocaleDateString([], { weekday: "short" });
 }
 
-function pushDate(map: Map<number, string[]>, id: number, date: string) {
-  const list = map.get(id) ?? [];
-  list.push(date);
-  map.set(id, list);
+/** Strength order for folding a period's days into one dot: a link you made by
+ *  hand outranks one a rule made, which outranks a day you excluded. */
+const LINK_RANK: Record<RowProject["state"], number> = {
+  direct: 3,
+  rule: 2,
+  excluded: 1,
+};
+
+type FoldedLink = {
+  state: RowProject["state"];
+  ruleId: number | null;
+  includedDates: string[];
+  excludedDates: string[];
+};
+
+function foldLink(map: Map<number, FoldedLink>, link: DayRowProject, date: string) {
+  // "inherited" never reaches a day row; treat anything unexpected as a rule
+  // rather than dropping the day silently.
+  const state: RowProject["state"] =
+    link.state === "direct" || link.state === "excluded" ? link.state : "rule";
+  const acc = map.get(link.project_id) ?? {
+    state,
+    ruleId: null,
+    includedDates: [],
+    excludedDates: [],
+  };
+  if (state === "excluded") {
+    acc.excludedDates.push(date);
+  } else {
+    acc.includedDates.push(date);
+  }
+  if (LINK_RANK[state] > LINK_RANK[acc.state]) acc.state = state;
+  // Keep the rule even when a hand-made link wins the dot, so the interface can
+  // still name what would take over if that link were removed.
+  acc.ruleId ??= link.rule_id;
+  map.set(link.project_id, acc);
 }
 
-function rowProjects(map: Map<number, string[]>): RowProject[] {
+function rowProjects(map: Map<number, FoldedLink>): RowProject[] {
   return [...map.entries()]
-    .map(([id, dates]) => ({ id, dates: [...new Set(dates)].sort() }))
+    .map(([id, acc]) => ({
+      id,
+      state: acc.state,
+      ruleId: acc.ruleId,
+      includedDates: [...new Set(acc.includedDates)].sort(),
+      excludedDates: [...new Set(acc.excludedDates)].sort(),
+    }))
     .sort((a, b) => a.id - b.id);
 }
 

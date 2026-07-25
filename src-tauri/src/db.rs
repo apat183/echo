@@ -30,13 +30,13 @@ pub struct Project {
 }
 
 /// One window-title's time within an app, with its explicit project tags (if any).
-/// `project_ids` are the title's OWN assignments — empty means it inherits the
+/// `projects` are the title's OWN assignments — empty means it inherits the
 /// app-level ones. Multiple ids = tagged with several projects.
 #[derive(Debug, Serialize)]
 pub struct TitleUsage {
     pub title: String, // "" = untitled / app has no window title
     pub seconds: i64,
-    pub project_ids: Vec<i64>,
+    pub projects: Vec<RowProject>,
 }
 
 /// One app's total time within a day, broken down by window title.
@@ -46,8 +46,8 @@ pub struct AppUsage {
     pub app_name: String, // display name
     pub bundle_id: Option<String>,
     pub seconds: i64,
-    pub hours: Vec<i64>,       // 24 buckets, seconds per hour of the local day
-    pub project_ids: Vec<i64>, // app-level (title = "") tags; empty = unassigned
+    pub hours: Vec<i64>, // 24 buckets, seconds per hour of the local day
+    pub projects: Vec<RowProject>, // what the app-level row itself says
     pub titles: Vec<TitleUsage>,
 }
 
@@ -89,7 +89,11 @@ pub struct ProjectPeriodNote {
 pub struct ProjectTitle {
     pub title: String, // "" = untitled
     pub seconds: i64,
-    pub can_remove: bool,
+    /// Why this title is in the project — `Direct` when explicit title-level
+    /// assignments exist to delete, `Rule` when a standing rule is responsible.
+    /// Never `Excluded`: an excluded title is not in the project at all.
+    pub state: LinkState,
+    pub rule_id: Option<i64>,
 }
 
 /// One app contributing time to a project (for the project view's app breakdown).
@@ -99,7 +103,48 @@ pub struct ProjectApp {
     pub app_name: String,
     pub bundle_id: Option<String>,
     pub seconds: i64,
+    /// Why this app is in the project, at the app level. `Rule` means the
+    /// remove action belongs on the rule, not on per-day rows.
+    pub state: LinkState,
+    pub rule_id: Option<i64>,
     pub titles: Vec<ProjectTitle>,
+}
+
+/// A standing instruction that an app's time belongs to a project (ADR 0001).
+/// `effective_from` is a *gate*: `None` reaches all history, `Some(date)` holds
+/// only from that local date onward. Subject is the app alone in version one;
+/// a title subject arrives as a further nullable column.
+/// Mirrors `AssignmentRule` in src/api.ts; keep the two in sync.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AssignmentRule {
+    pub id: i64,
+    pub project_id: i64,
+    pub app_key: String,
+    pub app_name: Option<String>,
+    pub effective_from: Option<String>,
+}
+
+/// An app that has been tracked, offered as a subject when writing a rule.
+/// Mirrors `TrackedApp` in src/api.ts; keep the two in sync.
+#[derive(Debug, Serialize)]
+pub struct TrackedApp {
+    pub app_key: String,
+    pub app_name: String,
+    pub bundle_id: Option<String>,
+    pub seconds: i64,
+}
+
+/// One line of a project's per-day receipt: what made up this day, and why.
+/// Mirrors `ReceiptEntry` in src/api.ts; keep the two in sync.
+#[derive(Debug, Serialize)]
+pub struct ReceiptEntry {
+    pub app_key: String,
+    pub app_name: String,
+    pub bundle_id: Option<String>,
+    pub title: String, // "" = untitled
+    pub seconds: i64,
+    pub state: LinkState,
+    pub rule_id: Option<i64>,
 }
 
 /// Auto-delete-untagged configuration.
@@ -166,7 +211,36 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     migrate_assignments_multi(&conn)?;
     migrate_projects_sort_order(&conn)?;
     migrate_ignored_entries_app_name(&conn)?;
+    migrate_add_rule_tables(&conn)?;
     Ok(conn)
+}
+
+/// DBs predating assignment rules have neither table. Both are additive — no
+/// existing row moves — so creating them is the whole migration.
+fn migrate_add_rule_tables(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "-- Standing 'this app is always that project' instructions (ADR 0001).
+        -- Resolved when time is read; never written into day_assignments.
+        CREATE TABLE IF NOT EXISTS assignment_rules (
+            id             INTEGER PRIMARY KEY,
+            project_id     INTEGER NOT NULL,
+            app_key        TEXT NOT NULL,
+            app_name       TEXT,           -- display only; the key is what matches
+            effective_from TEXT,           -- NULL = reaches all history
+            created_at     INTEGER NOT NULL
+        );
+
+        -- Dated 'this is NOT that project' decisions (ADR 0002). Mutually
+        -- exclusive with a day_assignments row on the same key.
+        CREATE TABLE IF NOT EXISTS assignment_exceptions (
+            date       TEXT NOT NULL,   -- local 'YYYY-MM-DD'
+            app_key    TEXT NOT NULL,
+            title      TEXT NOT NULL DEFAULT '',  -- '' = the app-level row
+            project_id INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (date, app_key, title, project_id)
+        );",
+    )
 }
 
 /// Older DBs keyed day_assignments by (date, app_key) with no `title`. Rebuild the
@@ -330,6 +404,11 @@ pub fn create_project(conn: &Connection, name: &str, color: &str) -> rusqlite::R
 pub fn delete_project(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM projects WHERE id = ?1", [id])?;
     conn.execute("DELETE FROM day_assignments WHERE project_id = ?1", [id])?;
+    conn.execute("DELETE FROM assignment_rules WHERE project_id = ?1", [id])?;
+    conn.execute(
+        "DELETE FROM assignment_exceptions WHERE project_id = ?1",
+        [id],
+    )?;
     Ok(())
 }
 
@@ -355,6 +434,9 @@ pub fn set_project_order(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()>
 /// carry several projects, each billed the full duration. Idempotent — adding the
 /// same tag twice is a no-op. `title = ""` is the app-level tag covering every
 /// title not tagged on its own.
+///
+/// Clears any exception on the same key: a key holds a yes or a no, never both
+/// (ADR 0002), so assigning is also how a recorded "no" is taken back.
 pub fn add_assignment(
     conn: &Connection,
     date: &str,
@@ -362,12 +444,18 @@ pub fn add_assignment(
     title: &str,
     project_id: i64,
 ) -> rusqlite::Result<()> {
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM assignment_exceptions
+         WHERE date = ?1 AND app_key = ?2 AND title = ?3 AND project_id = ?4",
+        rusqlite::params![date, app_key, title, project_id],
+    )?;
+    tx.execute(
         "INSERT INTO day_assignments (date, app_key, title, project_id) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(date, app_key, title, project_id) DO NOTHING",
         rusqlite::params![date, app_key, title, project_id],
     )?;
-    Ok(())
+    tx.commit()
 }
 
 /// Remove one project tag from a day's app/title-time, leaving any other tags
@@ -387,34 +475,201 @@ pub fn remove_assignment(
     Ok(())
 }
 
-/// Remove every assignment connecting this app to the project, across all days
-/// and titles. Used by the project view's app-level remove action.
-pub fn remove_project_app_assignments(
+/// Take an app — or one of its titles — out of a project entirely, from the
+/// project view's folded all-day rows.
+///
+/// Deletes the assignments that put it there and then, for every day where it
+/// would still be inherited from an app-level assignment or a standing rule,
+/// records an exception. Removal means the same thing here as it does on a day
+/// row: take back what put it there, and stop it coming back (ADR 0002). The
+/// rule itself is left alone — it is a separate object with its own controls,
+/// and deleting it would un-bill every other app it covers.
+///
+/// `title = None` removes the whole app; `Some(t)` removes just that title.
+/// Returns how many days had to be excepted, so the interface can say whether
+/// a rule is still standing behind the row.
+pub fn remove_from_project(
     conn: &Connection,
     project_id: i64,
     app_key: &str,
+    title: Option<&str>,
+) -> rusqlite::Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    match title {
+        Some(title) => tx.execute(
+            "DELETE FROM day_assignments
+             WHERE project_id = ?1 AND app_key = ?2 AND title = ?3",
+            rusqlite::params![project_id, app_key, title],
+        )?,
+        None => tx.execute(
+            "DELETE FROM day_assignments WHERE project_id = ?1 AND app_key = ?2",
+            rusqlite::params![project_id, app_key],
+        )?,
+    };
+
+    // Whatever the assignments no longer cover, inheritance might. Walk the
+    // segments once and veto the days that still bill.
+    let res = Resolver::load(&tx)?;
+    let ignores = Ignores::load(&tx)?;
+    let mut vetoed: HashSet<(String, String)> = HashSet::new();
+    for seg in read_segments(&tx, None)? {
+        let key = seg.key();
+        if key != app_key {
+            continue;
+        }
+        let seg_title = seg.title();
+        if title.is_some_and(|t| t != seg_title) || ignores.matches(&key, &seg_title) {
+            continue;
+        }
+        let date = seg.local_date();
+        if !res.bills(&date, &key, &seg_title, project_id) {
+            continue;
+        }
+        // An app-scope removal vetoes the app row, which covers every title
+        // under it; a title-scope removal vetoes only that title's row.
+        let veto_title = title.unwrap_or("").to_string();
+        vetoed.insert((date, veto_title));
+    }
+
+    for (date, veto_title) in &vetoed {
+        tx.execute(
+            "INSERT INTO assignment_exceptions (date, app_key, title, project_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(date, app_key, title, project_id) DO NOTHING",
+            rusqlite::params![
+                date,
+                app_key,
+                veto_title,
+                project_id,
+                Local::now().timestamp()
+            ],
+        )?;
+    }
+    let n = vetoed.len();
+    tx.commit()?;
+    Ok(n)
+}
+
+// ---- assignment rules -----------------------------------------------------
+
+/// Create a standing rule sending an app's time to a project. `effective_from`
+/// is `None` for a retroactive rule (the default) or a local 'YYYY-MM-DD' for a
+/// forward-only one. `app_name` is display only — the key is what matches.
+/// Rules are additive: two rules may name the same app and different projects,
+/// and both bill.
+pub fn create_rule(
+    conn: &Connection,
+    project_id: i64,
+    app_key: &str,
+    app_name: Option<&str>,
+    effective_from: Option<&str>,
+) -> rusqlite::Result<AssignmentRule> {
+    conn.execute(
+        "INSERT INTO assignment_rules (project_id, app_key, app_name, effective_from, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            project_id,
+            app_key,
+            app_name,
+            effective_from,
+            Local::now().timestamp()
+        ],
+    )?;
+    Ok(AssignmentRule {
+        id: conn.last_insert_rowid(),
+        project_id,
+        app_key: app_key.to_string(),
+        app_name: app_name.map(str::to_string),
+        effective_from: effective_from.map(str::to_string),
+    })
+}
+
+pub fn list_rules(conn: &Connection) -> rusqlite::Result<Vec<AssignmentRule>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, app_key, app_name, effective_from
+         FROM assignment_rules ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(AssignmentRule {
+            id: r.get(0)?,
+            project_id: r.get(1)?,
+            app_key: r.get(2)?,
+            app_name: r.get(3)?,
+            effective_from: r.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn delete_rule(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM assignment_rules WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+// ---- exceptions -----------------------------------------------------------
+
+/// Write the two statements behind an exception without owning a transaction.
+/// `exclude_for_day` owns the whole gesture's transaction; test fixtures may
+/// call this directly on their isolated in-memory connection.
+fn write_exception(
+    conn: &Connection,
+    date: &str,
+    app_key: &str,
+    title: &str,
+    project_id: i64,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "DELETE FROM day_assignments WHERE project_id = ?1 AND app_key = ?2",
-        rusqlite::params![project_id, app_key],
+        "DELETE FROM day_assignments
+         WHERE date = ?1 AND app_key = ?2 AND title = ?3 AND project_id = ?4",
+        rusqlite::params![date, app_key, title, project_id],
+    )?;
+    conn.execute(
+        "INSERT INTO assignment_exceptions (date, app_key, title, project_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(date, app_key, title, project_id) DO NOTHING",
+        rusqlite::params![date, app_key, title, project_id, Local::now().timestamp()],
     )?;
     Ok(())
 }
 
-/// Remove explicit title-level assignments connecting this title to the project.
-/// App-level assignments may still make the title inherit the project.
-pub fn remove_project_title_assignments(
+/// Clear a recorded "no", returning the row to Undecided so rules apply again.
+pub fn remove_exception(
     conn: &Connection,
-    project_id: i64,
+    date: &str,
     app_key: &str,
     title: &str,
+    project_id: i64,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "DELETE FROM day_assignments
-         WHERE project_id = ?1 AND app_key = ?2 AND title = ?3",
-        rusqlite::params![project_id, app_key, title],
+        "DELETE FROM assignment_exceptions
+         WHERE date = ?1 AND app_key = ?2 AND title = ?3 AND project_id = ?4",
+        rusqlite::params![date, app_key, title, project_id],
     )?;
     Ok(())
+}
+
+/// Take a row out of a project for one day — the gesture behind clicking a
+/// project dot (ADR 0002). Deletes whatever assignment put it there, then
+/// records an exception *only if* the row would still be inherited from an
+/// app-level assignment or a standing rule. So an ordinary hand-made link just
+/// disappears, storing nothing, exactly as it did before rules existed, while
+/// a rule-covered row lands on Excluded instead of springing back.
+pub fn exclude_for_day(
+    conn: &Connection,
+    date: &str,
+    app_key: &str,
+    title: &str,
+    project_id: i64,
+) -> rusqlite::Result<()> {
+    // One transaction: if the exception write failed after the assignment was
+    // already deleted, a rule-covered row would spring straight back to
+    // Included — the exact failure ADR 0002 exists to prevent.
+    let tx = conn.unchecked_transaction()?;
+    remove_assignment(&tx, date, app_key, title, project_id)?;
+    if Resolver::load_day(&tx, date)?.bills(date, app_key, title, project_id) {
+        write_exception(&tx, date, app_key, title, project_id)?;
+    }
+    tx.commit()
 }
 
 // ---- ignored entries ------------------------------------------------------
@@ -539,37 +794,109 @@ fn read_segments(conn: &Connection, range: Option<(i64, i64)>) -> rusqlite::Resu
     }
 }
 
-/// Project assignments with the resolution rule in one place. Keyed
-/// (date, app_key, title) → the projects tagged onto it; `title = ""` is the
-/// app-level entry covering every title that has no tag of its own. Each entry's
-/// project list is sorted ascending for deterministic output.
-struct Assignments {
-    by_key: HashMap<(String, String, String), Vec<i64>>,
+/// How a project came to be attached to a row, as shown in the UI.
+/// `Excluded` is not a link at all — it is a recorded decision that the row is
+/// *not* in the project (see ADR 0002), carried alongside the links so the
+/// interface can tell a deliberate "no" apart from an unreviewed gap.
+/// `Inherited` belongs to the project view — both its folded all-day rows and
+/// its per-day receipts — where a row is in the project solely because an
+/// app-level assignment covers it. Activity rows render inheritance by absence
+/// instead, so `row_projects` never emits it; conversely the project view
+/// never emits `Excluded`, because an excluded row is not in the project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkState {
+    Direct,
+    Rule,
+    Inherited,
+    Excluded,
 }
 
-impl Assignments {
-    /// Every assignment — project rollups span all days.
+/// One project's standing against a row, and why it holds.
+/// Mirrors `RowProject` in src/api.ts; keep the two in sync.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RowProject {
+    pub project_id: i64,
+    pub state: LinkState,
+    /// The rule responsible, when `state` is `Rule` — lets the UI name it.
+    pub rule_id: Option<i64>,
+}
+
+/// Everything needed to decide which projects a segment bills to, loaded once
+/// and consulted in one place. Resolution walks the four rungs of ADR 0001:
+/// `day-title > day-app > rule-title > rule-app`, stopping at the first that
+/// speaks. Version one has no title-subject rules, so the third rung is empty.
+///
+/// A row's own statements come in two polarities that are mutually exclusive
+/// per project: an assignment (yes) and an exception (no). Writing one clears
+/// the other, so a key never holds both.
+struct Resolver {
+    /// (date, app_key, title) → projects assigned, ascending.
+    assigned: HashMap<(String, String, String), Vec<i64>>,
+    /// (date, app_key, title) → projects excepted, ascending.
+    excepted: HashMap<(String, String, String), Vec<i64>>,
+    /// Date-less standing rules grouped by subject app, app-subject only in
+    /// version one. Each group is deduped so one project bills once.
+    rules: HashMap<String, Vec<AssignmentRule>>,
+}
+
+impl Resolver {
+    /// Everything — project rollups span all days.
     fn load(conn: &Connection) -> rusqlite::Result<Self> {
-        let mut stmt =
-            conn.prepare("SELECT date, app_key, title, project_id FROM day_assignments")?;
-        let rows = stmt.query_map([], Self::row)?;
-        Self::collect(rows)
+        Self::build(
+            conn.prepare("SELECT date, app_key, title, project_id FROM day_assignments")?
+                .query_map([], Self::row)?,
+            conn.prepare("SELECT date, app_key, title, project_id FROM assignment_exceptions")?
+                .query_map([], Self::row)?,
+            list_rules(conn)?,
+        )
     }
 
-    /// Just one day's assignments — the day view only needs the one date.
+    /// Just one day — the day view never looks outside it.
     fn load_day(conn: &Connection, date: &str) -> rusqlite::Result<Self> {
-        let mut stmt = conn.prepare(
-            "SELECT date, app_key, title, project_id FROM day_assignments WHERE date = ?1",
-        )?;
-        let rows = stmt.query_map([date], Self::row)?;
-        Self::collect(rows)
+        Self::build(
+            conn.prepare(
+                "SELECT date, app_key, title, project_id FROM day_assignments WHERE date = ?1",
+            )?
+            .query_map([date], Self::row)?,
+            conn.prepare(
+                "SELECT date, app_key, title, project_id FROM assignment_exceptions
+                 WHERE date = ?1",
+            )?
+            .query_map([date], Self::row)?,
+            list_rules(conn)?,
+        )
     }
 
     fn row(r: &rusqlite::Row) -> rusqlite::Result<(String, String, String, i64)> {
         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
     }
 
-    fn collect<I>(rows: I) -> rusqlite::Result<Self>
+    fn build<A, E>(assigned: A, excepted: E, rules: Vec<AssignmentRule>) -> rusqlite::Result<Self>
+    where
+        A: Iterator<Item = rusqlite::Result<(String, String, String, i64)>>,
+        E: Iterator<Item = rusqlite::Result<(String, String, String, i64)>>,
+    {
+        // Rules are grouped by subject once, so the hot path — resolving every
+        // segment in the database — is a single map probe rather than a scan,
+        // sort and dedup of every rule per segment.
+        let mut by_app: HashMap<String, Vec<AssignmentRule>> = HashMap::new();
+        for rule in rules {
+            by_app.entry(rule.app_key.clone()).or_default().push(rule);
+        }
+        for group in by_app.values_mut() {
+            group.sort_by_key(|rule| (rule.project_id, rule.id));
+            // Several rules may name the same project; bill it once.
+            group.dedup_by_key(|rule| rule.project_id);
+        }
+        Ok(Self {
+            assigned: Self::collect(assigned)?,
+            excepted: Self::collect(excepted)?,
+            rules: by_app,
+        })
+    }
+
+    fn collect<I>(rows: I) -> rusqlite::Result<HashMap<(String, String, String), Vec<i64>>>
     where
         I: Iterator<Item = rusqlite::Result<(String, String, String, i64)>>,
     {
@@ -585,33 +912,148 @@ impl Assignments {
         for ids in by_key.values_mut() {
             ids.sort_unstable();
         }
-        Ok(Self { by_key })
+        Ok(by_key)
     }
 
+    /// True when nothing anywhere could attach a project to a segment, letting
+    /// the project rollups skip reading segments at all.
     fn is_empty(&self) -> bool {
-        self.by_key.is_empty()
+        self.assigned.is_empty() && self.rules.is_empty()
     }
 
-    /// The explicit tags for exactly this (date, app_key, title) — no fallback.
-    /// The day view shows these per row so inheritance can be rendered.
-    fn links(&self, date: &str, app_key: &str, title: &str) -> &[i64] {
-        self.by_key
-            .get(&(date.to_string(), app_key.to_string(), title.to_string()))
+    fn lookup<'a>(
+        map: &'a HashMap<(String, String, String), Vec<i64>>,
+        date: &str,
+        app_key: &str,
+        title: &str,
+    ) -> &'a [i64] {
+        map.get(&(date.to_string(), app_key.to_string(), title.to_string()))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
-    /// The projects a segment is billed to: its own title tags if any, else the
-    /// app-level (title = "") tags. The title's tags OVERRIDE the app-level ones
-    /// (no union) — an explicitly-tagged title is not also billed app-level.
-    fn resolve(&self, date: &str, app_key: &str, title: &str) -> &[i64] {
-        let own = self.links(date, app_key, title);
-        if own.is_empty() {
-            self.links(date, app_key, "")
-        } else {
-            own
-        }
+    /// The projects assigned to exactly this row — no inheritance, no rules.
+    fn assigned_to(&self, date: &str, app_key: &str, title: &str) -> &[i64] {
+        Self::lookup(&self.assigned, date, app_key, title)
     }
+
+    /// The projects this row has been excepted from — no inheritance.
+    fn excepted_from(&self, date: &str, app_key: &str, title: &str) -> &[i64] {
+        Self::lookup(&self.excepted, date, app_key, title)
+    }
+
+    /// Standing rules whose subject is this app and whose gates are open on
+    /// `date`. A rule with no `effective_from` reaches all history (ADR 0001).
+    fn rule_links(&self, date: &str, app_key: &str) -> Vec<RowProject> {
+        let Some(group) = self.rules.get(app_key) else {
+            return Vec::new();
+        };
+        group
+            .iter()
+            .filter(|rule| {
+                rule.effective_from
+                    .as_deref()
+                    .is_none_or(|from| date >= from)
+            })
+            .map(|rule| RowProject {
+                project_id: rule.project_id,
+                state: LinkState::Rule,
+                rule_id: Some(rule.id),
+            })
+            .collect()
+    }
+
+    /// The projects a segment bills to, walking the rungs of ADR 0001. The
+    /// title's own assignments answer outright; failing that the app-level ones
+    /// answer, less anything the title was excepted from; failing that the
+    /// rules answer, less anything either row was excepted from.
+    fn resolve(&self, date: &str, app_key: &str, title: &str) -> Vec<RowProject> {
+        let own = self.assigned_to(date, app_key, title);
+        if !own.is_empty() {
+            return direct_links(own);
+        }
+
+        let title_vetoes = self.excepted_from(date, app_key, title);
+        let app_level = self.assigned_to(date, app_key, "");
+        if !app_level.is_empty() {
+            let mut links = direct_links(app_level);
+            links.retain(|link| !title_vetoes.contains(&link.project_id));
+            return links;
+        }
+
+        let app_vetoes = self.excepted_from(date, app_key, "");
+        let mut links = self.rule_links(date, app_key);
+        links.retain(|link| {
+            !title_vetoes.contains(&link.project_id) && !app_vetoes.contains(&link.project_id)
+        });
+        links
+    }
+
+    /// Does this segment bill to `project_id`?
+    fn bills(&self, date: &str, app_key: &str, title: &str, project_id: i64) -> bool {
+        self.resolve(date, app_key, title)
+            .iter()
+            .any(|link| link.project_id == project_id)
+    }
+
+    /// What the day view draws against a row: the projects the row itself
+    /// speaks for, plus the ones it has been excepted from. Inheritance is
+    /// rendered by *absence* on title rows, exactly as before rules existed —
+    /// an app-level row additionally shows the rules standing behind it, since
+    /// that is the row a rule attaches to.
+    ///
+    /// A project appears at most once. An exception must *replace* the link it
+    /// cancels rather than sit beside it, or Excluded would render as Included
+    /// and the dot would stop responding (ADR 0002: the three states must never
+    /// render alike).
+    fn row_projects(&self, date: &str, app_key: &str, title: &str) -> Vec<RowProject> {
+        let vetoes = self.excepted_from(date, app_key, title);
+        let mut out = direct_links(self.assigned_to(date, app_key, title));
+        if out.is_empty() && title.is_empty() {
+            out = self.rule_links(date, app_key);
+        }
+        out.retain(|link| !vetoes.contains(&link.project_id));
+        for &project_id in vetoes {
+            out.push(RowProject {
+                project_id,
+                state: LinkState::Excluded,
+                rule_id: None,
+            });
+        }
+        out.sort_by_key(|link| link.project_id);
+        out
+    }
+
+    /// Why `project_id` holds this segment — as the title row sees it, and as
+    /// the app row sees it. `None` when the segment does not bill to the
+    /// project at all. Both come from one resolution pass, and live here so
+    /// provenance is never re-derived from the raw tables at a call site.
+    fn origins_for(
+        &self,
+        date: &str,
+        app_key: &str,
+        title: &str,
+        project_id: i64,
+    ) -> Option<(Origin, Origin)> {
+        let link = self
+            .resolve(date, app_key, title)
+            .into_iter()
+            .find(|link| link.project_id == project_id)?;
+        Some((
+            Origin::of(&link, self.assigned_to(date, app_key, title), project_id),
+            Origin::of(&link, self.assigned_to(date, app_key, ""), project_id),
+        ))
+    }
+}
+
+fn direct_links(ids: &[i64]) -> Vec<RowProject> {
+    ids.iter()
+        .map(|&project_id| RowProject {
+            project_id,
+            state: LinkState::Direct,
+            rule_id: None,
+        })
+        .collect()
 }
 
 /// Global app/title ignore rules. An app-level rule (`title = ""`) hides every
@@ -664,11 +1106,11 @@ pub(crate) fn day_start_ts(date: &str) -> i64 {
 /// The ids of segments that resolve to **zero** projects ("untagged"). `before`
 /// = `Some(ts)` restricts to segments *starting* before `ts` (auto-delete);
 /// `None` considers every segment ("clear untagged"). Untagged is defined by
-/// the same `Assignments::resolve` used everywhere else — the app-level
-/// (`title = ""`) fallback is included, so a title covered only by an app-level
-/// tag is NOT untagged.
+/// the same `Resolver::resolve` used everywhere else, so a title covered only
+/// by an app-level tag — or by a standing rule — is NOT untagged, while a row
+/// excepted from every project it would otherwise bill to IS.
 fn untagged_segment_ids(conn: &Connection, before: Option<i64>) -> rusqlite::Result<Vec<i64>> {
-    let assigns = Assignments::load(conn)?;
+    let res = Resolver::load(conn)?;
     let sql = match before {
         Some(_) => {
             "SELECT id, start_ts, end_ts, app_bundle_id, app_name, window_title \
@@ -697,7 +1139,7 @@ fn untagged_segment_ids(conn: &Connection, before: Option<i64>) -> rusqlite::Res
     };
     let mut ids = Vec::new();
     for (id, seg) in rows {
-        if assigns
+        if res
             .resolve(&seg.local_date(), &seg.key(), &seg.title())
             .is_empty()
         {
@@ -735,23 +1177,32 @@ pub fn purge_untagged_older_than(conn: &Connection, days: u32) -> rusqlite::Resu
     Ok(n)
 }
 
-/// Clear all *tracking* data — segments, day assignments, and period notes —
-/// while keeping user-defined projects and ignore rules.
+/// Clear all *tracking* data — segments, the per-day judgements about them, and
+/// period notes — while keeping user-defined projects, standing rules and
+/// ignore rules. Exceptions go with the assignments: they are the two
+/// polarities of one dated statement (ADR 0002) and must not diverge.
 pub fn clear_tracking_data(conn: &Connection) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM segments", [])?;
     tx.execute("DELETE FROM day_assignments", [])?;
+    tx.execute("DELETE FROM assignment_exceptions", [])?;
     tx.execute("DELETE FROM project_period_notes", [])?;
     tx.commit()
 }
 
-/// Wipe everything — all five data tables. Used by "Reset everything". Leaves
-/// `app_settings` (theme lives in localStorage; auto-delete config is intentionally
-/// preserved so a reset doesn't silently re-enable/disable purging).
+/// Wipe every data table. Used by "Reset everything". Leaves `app_settings`
+/// (theme lives in localStorage; auto-delete config is intentionally preserved
+/// so a reset doesn't silently re-enable/disable purging).
+///
+/// Rules and exceptions reference projects by id, and SQLite reuses rowids —
+/// leaving them behind would silently graft the old project's rules onto the
+/// next project created.
 pub fn reset_everything(conn: &Connection) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM segments", [])?;
     tx.execute("DELETE FROM day_assignments", [])?;
+    tx.execute("DELETE FROM assignment_exceptions", [])?;
+    tx.execute("DELETE FROM assignment_rules", [])?;
     tx.execute("DELETE FROM project_period_notes", [])?;
     tx.execute("DELETE FROM ignored_entries", [])?;
     tx.execute("DELETE FROM projects", [])?;
@@ -801,7 +1252,7 @@ pub fn set_autodelete_config(conn: &Connection, enabled: bool, days: u32) -> rus
 pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
     let start = day_start_ts(date);
     let end = start + 86_400;
-    let assigns = Assignments::load_day(conn, date)?;
+    let res = Resolver::load_day(conn, date)?;
     let ignores = Ignores::load(conn)?;
 
     struct AppAcc {
@@ -859,14 +1310,14 @@ pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
                 .titles
                 .into_iter()
                 .map(|(title, seconds)| TitleUsage {
-                    project_ids: assigns.links(date, &key, &title).to_vec(),
+                    projects: res.row_projects(date, &key, &title),
                     title,
                     seconds,
                 })
                 .collect();
             titles.sort_by_key(|title| std::cmp::Reverse(title.seconds));
             AppUsage {
-                project_ids: assigns.links(date, &key, "").to_vec(),
+                projects: res.row_projects(date, &key, ""),
                 app_key: key,
                 app_name: acc.app_name,
                 bundle_id: acc.bundle_id,
@@ -906,8 +1357,8 @@ pub fn day_total_seconds(conn: &Connection, date: &str) -> rusqlite::Result<i64>
 /// Per-day totals for everything that resolves to `project_id` (newest day first).
 /// Resolution per segment: its own (app, title) tags, else the app-level (app, "") tags.
 pub fn project_breakdown(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<DayTotal>> {
-    let assigns = Assignments::load(conn)?;
-    if assigns.is_empty() {
+    let res = Resolver::load(conn)?;
+    if res.is_empty() {
         return Ok(vec![]);
     }
     let ignores = Ignores::load(conn)?;
@@ -920,7 +1371,7 @@ pub fn project_breakdown(conn: &Connection, project_id: i64) -> rusqlite::Result
         if ignores.matches(&key, &title) {
             continue;
         }
-        if assigns.resolve(&date, &key, &title).contains(&project_id) {
+        if res.bills(&date, &key, &title, project_id) {
             *totals.entry(date).or_insert(0) += seg.duration();
         }
     }
@@ -960,8 +1411,8 @@ pub fn ignored_breakdown(conn: &Connection) -> rusqlite::Result<Vec<DayTotal>> {
 /// Which apps (and their titles) make up a project's total.
 /// Same per-segment resolution as the breakdown.
 pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<ProjectApp>> {
-    let assigns = Assignments::load(conn)?;
-    if assigns.is_empty() {
+    let res = Resolver::load(conn)?;
+    if res.is_empty() {
         return Ok(vec![]);
     }
     let ignores = Ignores::load(conn)?;
@@ -970,11 +1421,12 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
         name: String,
         bundle: Option<String>,
         seconds: i64,
+        origin: Origin,
         titles: HashMap<String, TitleAcc>,
     }
     struct TitleAcc {
         seconds: i64,
-        can_remove: bool,
+        origin: Origin,
     }
     let mut by_app: HashMap<String, AppAcc> = HashMap::new();
 
@@ -985,24 +1437,26 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
         if ignores.matches(&key, &title) {
             continue;
         }
-        if !assigns.resolve(&date, &key, &title).contains(&project_id) {
+        let Some((title_origin, app_origin)) = res.origins_for(&date, &key, &title, project_id)
+        else {
             continue;
-        }
-        let can_remove =
-            !title.is_empty() && assigns.links(&date, &key, &title).contains(&project_id);
+        };
+
         let acc = by_app.entry(key).or_insert_with(|| AppAcc {
             name: seg.display_name(),
             bundle: seg.bundle_id.clone(),
             seconds: 0,
+            origin: Origin::default(),
             titles: HashMap::new(),
         });
         acc.seconds += seg.duration();
+        acc.origin = acc.origin.strongest(app_origin);
         let title_acc = acc.titles.entry(title).or_insert(TitleAcc {
             seconds: 0,
-            can_remove: false,
+            origin: Origin::default(),
         });
         title_acc.seconds += seg.duration();
-        title_acc.can_remove |= can_remove;
+        title_acc.origin = title_acc.origin.strongest(title_origin);
     }
 
     let mut out: Vec<ProjectApp> = by_app
@@ -1014,7 +1468,8 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
                 .map(|(title, acc)| ProjectTitle {
                     title,
                     seconds: acc.seconds,
-                    can_remove: acc.can_remove,
+                    state: acc.origin.state,
+                    rule_id: acc.origin.rule_id,
                 })
                 .collect();
             titles.sort_by_key(|title| std::cmp::Reverse(title.seconds));
@@ -1023,11 +1478,150 @@ pub fn project_apps(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<
                 app_name: acc.name,
                 bundle_id: acc.bundle,
                 seconds: acc.seconds,
+                state: acc.origin.state,
+                rule_id: acc.origin.rule_id,
                 titles,
             }
         })
         .collect();
     out.sort_by_key(|app| std::cmp::Reverse(app.seconds));
+    Ok(out)
+}
+
+/// Why an *aggregate* project row (all days folded together) is in the project,
+/// and therefore what acting on it should do. Folding many days into one row
+/// needs a winner: something directly assigned outranks a rule, because there
+/// are rows to delete; a rule outranks bare inheritance, because there is at
+/// least a rule to edit.
+#[derive(Debug, Clone, Copy)]
+struct Origin {
+    state: LinkState,
+    rule_id: Option<i64>,
+}
+
+impl Default for Origin {
+    fn default() -> Self {
+        Self {
+            state: LinkState::Inherited,
+            rule_id: None,
+        }
+    }
+}
+
+impl Origin {
+    /// `assigned` is what the row in question says for *itself*. When it names
+    /// the project there is an explicit record to delete; otherwise the row is
+    /// only along for the ride — via a standing rule if one is responsible,
+    /// else by inheriting an assignment made further up.
+    fn of(link: &RowProject, assigned: &[i64], project_id: i64) -> Self {
+        if assigned.contains(&project_id) {
+            Self {
+                state: LinkState::Direct,
+                rule_id: None,
+            }
+        } else if link.state == LinkState::Rule {
+            Self {
+                state: LinkState::Rule,
+                rule_id: link.rule_id,
+            }
+        } else {
+            Self::default()
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self.state {
+            LinkState::Direct => 3,
+            LinkState::Rule => 2,
+            LinkState::Inherited => 1,
+            LinkState::Excluded => 0,
+        }
+    }
+
+    fn strongest(self, other: Self) -> Self {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// One day of a project, decomposed into the activity that made it up and the
+/// reason each line is there. This is the receipt behind a day's total: after
+/// rules, a project can contain time nobody linked by hand, and a number with
+/// no way to interrogate it is not reviewable (ADR 0002).
+pub fn project_day_entries(
+    conn: &Connection,
+    project_id: i64,
+    date: &str,
+) -> rusqlite::Result<Vec<ReceiptEntry>> {
+    let res = Resolver::load_day(conn, date)?;
+    if res.is_empty() {
+        return Ok(vec![]);
+    }
+    let ignores = Ignores::load(conn)?;
+    let start = day_start_ts(date);
+
+    let mut by_row: HashMap<(String, String), ReceiptEntry> = HashMap::new();
+    for seg in read_segments(conn, Some((start, start + 86_400)))? {
+        let key = seg.key();
+        let title = seg.title();
+        if ignores.matches(&key, &title) {
+            continue;
+        }
+        let Some((origin, _)) = res.origins_for(date, &key, &title, project_id) else {
+            continue;
+        };
+        let entry = by_row
+            .entry((key.clone(), title.clone()))
+            .or_insert_with(|| ReceiptEntry {
+                app_key: key,
+                app_name: seg.display_name(),
+                bundle_id: seg.bundle_id.clone(),
+                title,
+                seconds: 0,
+                state: origin.state,
+                rule_id: origin.rule_id,
+            });
+        entry.seconds += seg.duration();
+    }
+
+    let mut out: Vec<ReceiptEntry> = by_row.into_values().collect();
+    out.sort_by(|a, b| {
+        b.seconds
+            .cmp(&a.seconds)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    Ok(out)
+}
+
+/// Every app that has been tracked, busiest first — the candidates for a rule.
+/// Ignored apps are left out: they are not activity, so they cannot belong to
+/// a project.
+pub fn tracked_apps(conn: &Connection) -> rusqlite::Result<Vec<TrackedApp>> {
+    let ignores = Ignores::load(conn)?;
+    let mut by_key: HashMap<String, TrackedApp> = HashMap::new();
+    for seg in read_segments(conn, None)? {
+        let key = seg.key();
+        let title = seg.title();
+        if ignores.matches(&key, &title) {
+            continue;
+        }
+        let entry = by_key.entry(key.clone()).or_insert_with(|| TrackedApp {
+            app_key: key,
+            app_name: seg.display_name(),
+            bundle_id: seg.bundle_id.clone(),
+            seconds: 0,
+        });
+        entry.seconds += seg.duration();
+    }
+    let mut out: Vec<TrackedApp> = by_key.into_values().collect();
+    out.sort_by(|a, b| {
+        b.seconds
+            .cmp(&a.seconds)
+            .then_with(|| a.app_name.cmp(&b.app_name))
+    });
     Ok(out)
 }
 
@@ -1102,6 +1696,12 @@ mod tests {
         title: Option<&str>,
     ) {
         insert_segment(conn, start, end, bundle, name, title).unwrap();
+    }
+
+    /// Just the project ids from a resolution, for assertions that care about
+    /// *which* projects rather than why.
+    fn ids(links: &[RowProject]) -> Vec<i64> {
+        links.iter().map(|link| link.project_id).collect()
     }
 
     #[test]
@@ -1315,11 +1915,11 @@ mod tests {
 
         let view = day_view(&conn, d).unwrap();
         let app = &view.apps[0];
-        assert_eq!(app.project_ids, vec![work.id]); // app-level tag
+        assert_eq!(ids(&app.projects), vec![work.id]); // app-level tag
         let tx = app.titles.iter().find(|t| t.title == "x").unwrap();
         let ty = app.titles.iter().find(|t| t.title == "y").unwrap();
-        assert!(tx.project_ids.is_empty()); // inherits app-level, no own tag
-        assert_eq!(ty.project_ids, vec![side.id]); // explicit title tag
+        assert!(tx.projects.is_empty()); // inherits app-level, no own tag
+        assert_eq!(ids(&ty.projects), vec![side.id]); // explicit title tag
     }
 
     // ---- project_breakdown ------------------------------------------------
@@ -1433,14 +2033,14 @@ mod tests {
         assert_eq!(app.seconds, 150);
         let tx = app.titles.iter().find(|t| t.title == "x").unwrap();
         assert_eq!(tx.seconds, 100);
-        assert!(!tx.can_remove);
+        assert_eq!(tx.state, LinkState::Inherited);
         let ty = app.titles.iter().find(|t| t.title == "y").unwrap();
         assert_eq!(ty.seconds, 50);
-        assert!(!ty.can_remove);
+        assert_eq!(ty.state, LinkState::Inherited);
     }
 
     #[test]
-    fn project_apps_marks_explicit_title_rows_removable() {
+    fn project_apps_reports_explicit_title_rows_as_direct() {
         let conn = mem();
         let work = create_project(&conn, "Work", "#fff").unwrap();
         let d = "2026-03-10";
@@ -1450,7 +2050,7 @@ mod tests {
 
         let apps = project_apps(&conn, work.id).unwrap();
         let title = apps[0].titles.iter().find(|t| t.title == "x").unwrap();
-        assert!(title.can_remove);
+        assert_eq!(title.state, LinkState::Direct);
     }
 
     #[test]
@@ -1466,7 +2066,10 @@ mod tests {
         let app = &apps[0];
         let untitled = app.titles.iter().find(|t| t.title.is_empty()).unwrap();
         assert_eq!(untitled.seconds, 100);
-        assert!(!untitled.can_remove);
+        // The untitled row *is* the app-level row, so it reports the app-level
+        // assignment directly; the interface, not the data, suppresses a
+        // separate remove control for it.
+        assert_eq!(untitled.state, LinkState::Direct);
     }
 
     #[test]
@@ -1584,10 +2187,10 @@ mod tests {
         add_assignment(&conn, d, "com.a", "", work.id).unwrap();
         add_assignment(&conn, d, "com.a", "y", other.id).unwrap();
 
-        let a = Assignments::load(&conn).unwrap();
-        assert_eq!(a.resolve(d, "com.a", "x"), [work.id]); // app-level fallback
-        assert_eq!(a.resolve(d, "com.a", "y"), [other.id]); // title tag overrides
-        assert!(a.resolve(d, "com.z", "x").is_empty()); // unknown app
+        let a = Resolver::load(&conn).unwrap();
+        assert_eq!(ids(&a.resolve(d, "com.a", "x")), [work.id]); // app-level fallback
+        assert_eq!(ids(&a.resolve(d, "com.a", "y")), [other.id]); // title tag overrides
+        assert!(ids(&a.resolve(d, "com.z", "x")).is_empty()); // unknown app
     }
 
     #[test]
@@ -1597,9 +2200,9 @@ mod tests {
         let d = "2026-03-10";
         add_assignment(&conn, d, "com.a", "", work.id).unwrap();
 
-        let a = Assignments::load(&conn).unwrap();
-        assert_eq!(a.links(d, "com.a", ""), [work.id]); // explicit app-level
-        assert!(a.links(d, "com.a", "x").is_empty()); // no fallback to app-level
+        let a = Resolver::load(&conn).unwrap();
+        assert_eq!(a.assigned_to(d, "com.a", ""), [work.id]); // explicit app-level
+        assert!(a.assigned_to(d, "com.a", "x").is_empty()); // no fallback to app-level
     }
 
     #[test]
@@ -1609,9 +2212,9 @@ mod tests {
         add_assignment(&conn, "2026-03-10", "com.a", "", work.id).unwrap();
         add_assignment(&conn, "2026-03-11", "com.b", "", work.id).unwrap();
 
-        let a = Assignments::load_day(&conn, "2026-03-10").unwrap();
-        assert_eq!(a.links("2026-03-10", "com.a", ""), [work.id]);
-        assert!(a.links("2026-03-11", "com.b", "").is_empty()); // other day not loaded
+        let a = Resolver::load_day(&conn, "2026-03-10").unwrap();
+        assert_eq!(a.assigned_to("2026-03-10", "com.a", ""), [work.id]);
+        assert!(a.assigned_to("2026-03-11", "com.b", "").is_empty()); // other day not loaded
     }
 
     // ---- tag semantics (many-to-many) -------------------------------------
@@ -1636,7 +2239,7 @@ mod tests {
         // day_view surfaces both ids, sorted ascending.
         let view = day_view(&conn, d).unwrap();
         let tx = view.apps[0].titles.iter().find(|t| t.title == "x").unwrap();
-        assert_eq!(tx.project_ids, vec![lo, hi]);
+        assert_eq!(ids(&tx.projects), vec![lo, hi]);
 
         // Each project is billed the FULL duration (overlap is by design).
         let bd1 = project_breakdown(&conn, p1.id).unwrap();
@@ -1658,12 +2261,12 @@ mod tests {
 
         remove_assignment(&conn, d, "com.a", "x", p1.id).unwrap();
 
-        let a = Assignments::load(&conn).unwrap();
-        assert_eq!(a.links(d, "com.a", "x"), [p2.id]); // only p1's tag removed
+        let a = Resolver::load(&conn).unwrap();
+        assert_eq!(a.assigned_to(d, "com.a", "x"), [p2.id]); // only p1's tag removed
     }
 
     #[test]
-    fn remove_project_app_assignments_clears_all_app_rows_for_project() {
+    fn removing_an_app_from_a_project_clears_all_its_rows() {
         let conn = mem();
         let p1 = create_project(&conn, "P1", "#fff").unwrap();
         let p2 = create_project(&conn, "P2", "#000").unwrap();
@@ -1673,16 +2276,16 @@ mod tests {
         add_assignment(&conn, d, "com.a", "x", p2.id).unwrap();
         add_assignment(&conn, d, "com.b", "", p1.id).unwrap();
 
-        remove_project_app_assignments(&conn, p1.id, "com.a").unwrap();
+        remove_from_project(&conn, p1.id, "com.a", None).unwrap();
 
-        let a = Assignments::load(&conn).unwrap();
-        assert!(a.links(d, "com.a", "").is_empty());
-        assert_eq!(a.links(d, "com.a", "x"), [p2.id]);
-        assert_eq!(a.links(d, "com.b", ""), [p1.id]);
+        let a = Resolver::load(&conn).unwrap();
+        assert!(a.assigned_to(d, "com.a", "").is_empty());
+        assert_eq!(a.assigned_to(d, "com.a", "x"), [p2.id]);
+        assert_eq!(a.assigned_to(d, "com.b", ""), [p1.id]);
     }
 
     #[test]
-    fn remove_project_title_assignments_clears_only_exact_title_rows() {
+    fn removing_a_title_from_a_project_clears_only_that_title() {
         let conn = mem();
         let p1 = create_project(&conn, "P1", "#fff").unwrap();
         let p2 = create_project(&conn, "P2", "#000").unwrap();
@@ -1691,11 +2294,11 @@ mod tests {
         add_assignment(&conn, d, "com.a", "x", p1.id).unwrap();
         add_assignment(&conn, d, "com.a", "x", p2.id).unwrap();
 
-        remove_project_title_assignments(&conn, p1.id, "com.a", "x").unwrap();
+        remove_from_project(&conn, p1.id, "com.a", Some("x")).unwrap();
 
-        let a = Assignments::load(&conn).unwrap();
-        assert_eq!(a.links(d, "com.a", ""), [p1.id]);
-        assert_eq!(a.links(d, "com.a", "x"), [p2.id]);
+        let a = Resolver::load(&conn).unwrap();
+        assert_eq!(a.assigned_to(d, "com.a", ""), [p1.id]);
+        assert_eq!(a.assigned_to(d, "com.a", "x"), [p2.id]);
     }
 
     #[test]
@@ -1707,9 +2310,9 @@ mod tests {
         add_assignment(&conn, d, "com.a", "", p1.id).unwrap(); // app-level
         add_assignment(&conn, d, "com.a", "x", p2.id).unwrap(); // title
 
-        let a = Assignments::load(&conn).unwrap();
+        let a = Resolver::load(&conn).unwrap();
         // Title's own tag wins outright; the app-level tag is NOT unioned in.
-        assert_eq!(a.resolve(d, "com.a", "x"), [p2.id]);
+        assert_eq!(ids(&a.resolve(d, "com.a", "x")), [p2.id]);
     }
 
     // ---- migration --------------------------------------------------------
@@ -1742,25 +2345,26 @@ mod tests {
             .is_err());
 
         migrate_assignments_multi(&conn).unwrap();
+        migrate_add_rule_tables(&conn).unwrap();
 
         // Existing rows survive the rebuild.
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM day_assignments", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
-        let a = Assignments::load(&conn).unwrap();
-        assert_eq!(a.links("2026-03-10", "com.a", "x"), [1]);
-        assert_eq!(a.links("2026-03-10", "com.a", ""), [2]);
+        let a = Resolver::load(&conn).unwrap();
+        assert_eq!(a.assigned_to("2026-03-10", "com.a", "x"), [1]);
+        assert_eq!(a.assigned_to("2026-03-10", "com.a", ""), [2]);
 
         // After: a second project for the same key is now insertable.
         add_assignment(&conn, "2026-03-10", "com.a", "x", 9).unwrap();
-        let a = Assignments::load(&conn).unwrap();
-        assert_eq!(a.links("2026-03-10", "com.a", "x"), [1, 9]);
+        let a = Resolver::load(&conn).unwrap();
+        assert_eq!(a.assigned_to("2026-03-10", "com.a", "x"), [1, 9]);
 
         // A second migration run is a no-op (schema already new).
         migrate_assignments_multi(&conn).unwrap();
-        let a = Assignments::load(&conn).unwrap();
-        assert_eq!(a.links("2026-03-10", "com.a", "x"), [1, 9]);
+        let a = Resolver::load(&conn).unwrap();
+        assert_eq!(a.assigned_to("2026-03-10", "com.a", "x"), [1, 9]);
     }
 
     #[test]
@@ -1784,23 +2388,24 @@ mod tests {
         // Run migrations in the same order as open().
         migrate_assignments_title(&conn).unwrap();
         migrate_assignments_multi(&conn).unwrap();
+        migrate_add_rule_tables(&conn).unwrap();
 
         // Both rows survived with title backfilled to ''.
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM day_assignments", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
-        let a = Assignments::load(&conn).unwrap();
-        assert_eq!(a.links("2026-01-05", "com.x", ""), [10]);
-        assert_eq!(a.links("2026-01-05", "com.y", ""), [20]);
+        let a = Resolver::load(&conn).unwrap();
+        assert_eq!(a.assigned_to("2026-01-05", "com.x", ""), [10]);
+        assert_eq!(a.assigned_to("2026-01-05", "com.y", ""), [20]);
 
         // The final schema has project_id in the PK, so two projects on the
         // same (date, app_key, title) are insertable (migrate_assignments_multi
         // was effectively a no-op because migrate_assignments_title already
         // wrote the 4-column PK form).
         add_assignment(&conn, "2026-01-05", "com.x", "", 99).unwrap();
-        let a = Assignments::load(&conn).unwrap();
-        assert_eq!(a.links("2026-01-05", "com.x", ""), [10, 99]);
+        let a = Resolver::load(&conn).unwrap();
+        assert_eq!(a.assigned_to("2026-01-05", "com.x", ""), [10, 99]);
     }
 
     // ---- project ordering -------------------------------------------------
@@ -2059,5 +2664,505 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(names, vec!["A".to_string(), "C".to_string()]);
+    }
+
+    // ---- assignment rules -------------------------------------------------
+
+    #[test]
+    fn rule_bills_matching_activity_without_any_assignment() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), Some("t"));
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+
+        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+
+        let rows = project_breakdown(&conn, p.id).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].date, d);
+        assert_eq!(rows[0].seconds, 100);
+    }
+
+    #[test]
+    fn rules_can_be_listed_and_deleted() {
+        let conn = mem();
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        let id = create_rule(&conn, p.id, "dev.warp", None, None).unwrap().id;
+        create_rule(&conn, p.id, "com.zen", None, Some("2026-04-01")).unwrap();
+
+        let rules = list_rules(&conn).unwrap();
+        assert_eq!(rules.len(), 2);
+        let warp = rules.iter().find(|r| r.app_key == "dev.warp").unwrap();
+        assert_eq!(warp.project_id, p.id);
+        assert_eq!(warp.effective_from, None);
+        let zen = rules.iter().find(|r| r.app_key == "com.zen").unwrap();
+        assert_eq!(zen.effective_from.as_deref(), Some("2026-04-01"));
+
+        delete_rule(&conn, id).unwrap();
+        let rules = list_rules(&conn).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].app_key, "com.zen");
+    }
+
+    #[test]
+    fn forward_only_rule_ignores_days_before_it_takes_effect() {
+        let conn = mem();
+        let before = "2026-04-01";
+        let after = "2026-04-03";
+        seg(
+            &conn,
+            day_start_ts(before),
+            day_start_ts(before) + 100,
+            Some("dev.warp"),
+            Some("Warp"),
+            None,
+        );
+        seg(
+            &conn,
+            day_start_ts(after),
+            day_start_ts(after) + 60,
+            Some("dev.warp"),
+            Some("Warp"),
+            None,
+        );
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+
+        create_rule(&conn, p.id, "dev.warp", None, Some("2026-04-02")).unwrap();
+
+        let rows = project_breakdown(&conn, p.id).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].date, after);
+        assert_eq!(rows[0].seconds, 60);
+    }
+
+    #[test]
+    fn day_assignment_outranks_a_standing_rule() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), None);
+        let flow = create_project(&conn, "Flowstate", "#fff").unwrap();
+        let side = create_project(&conn, "Side", "#000").unwrap();
+        create_rule(&conn, flow.id, "dev.warp", None, None).unwrap();
+
+        add_assignment(&conn, d, "dev.warp", "", side.id).unwrap();
+
+        // Layer-first: the dated act answers, and the rule is not unioned in.
+        assert!(project_breakdown(&conn, flow.id).unwrap().is_empty());
+        assert_eq!(project_breakdown(&conn, side.id).unwrap()[0].seconds, 100);
+    }
+
+    #[test]
+    fn two_rules_on_one_app_bill_both_projects() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), None);
+        let a = create_project(&conn, "A", "#fff").unwrap();
+        let b = create_project(&conn, "B", "#000").unwrap();
+        create_rule(&conn, a.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, b.id, "dev.warp", None, None).unwrap();
+
+        // Rules at one rung union, and each bills the full duration.
+        assert_eq!(project_breakdown(&conn, a.id).unwrap()[0].seconds, 100);
+        assert_eq!(project_breakdown(&conn, b.id).unwrap()[0].seconds, 100);
+    }
+
+    #[test]
+    fn exception_withdraws_one_day_from_a_rule() {
+        let conn = mem();
+        let kept = "2026-04-01";
+        let dropped = "2026-04-02";
+        for d in [kept, dropped] {
+            seg(
+                &conn,
+                day_start_ts(d),
+                day_start_ts(d) + 100,
+                Some("dev.warp"),
+                Some("Warp"),
+                None,
+            );
+        }
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+
+        write_exception(&conn, dropped, "dev.warp", "", p.id).unwrap();
+
+        let rows = project_breakdown(&conn, p.id).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].date, kept);
+
+        // Clearing it returns the day to Undecided, so the rule applies again.
+        remove_exception(&conn, dropped, "dev.warp", "", p.id).unwrap();
+        assert_eq!(project_breakdown(&conn, p.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn assigning_clears_an_exception_on_the_same_key() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), None);
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        write_exception(&conn, d, "dev.warp", "", p.id).unwrap();
+
+        add_assignment(&conn, d, "dev.warp", "", p.id).unwrap();
+
+        // A key holds a yes or a no, never both.
+        let res = Resolver::load(&conn).unwrap();
+        assert!(res.excepted_from(d, "dev.warp", "").is_empty());
+        assert_eq!(project_breakdown(&conn, p.id).unwrap()[0].seconds, 100);
+    }
+
+    #[test]
+    fn exception_carves_one_title_out_of_an_app_level_assignment() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.zen"),
+            Some("Zen"),
+            Some("work"),
+        );
+        seg(
+            &conn,
+            s + 100,
+            s + 160,
+            Some("com.zen"),
+            Some("Zen"),
+            Some("personal"),
+        );
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        add_assignment(&conn, d, "com.zen", "", p.id).unwrap();
+
+        write_exception(&conn, d, "com.zen", "personal", p.id).unwrap();
+
+        // The app-level tag still covers "work"; "personal" is carved out.
+        assert_eq!(project_breakdown(&conn, p.id).unwrap()[0].seconds, 100);
+    }
+
+    #[test]
+    fn rule_covered_activity_is_not_untagged() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), None);
+        seg(
+            &conn,
+            s + 100,
+            s + 200,
+            Some("com.other"),
+            Some("Other"),
+            None,
+        );
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+
+        // Auto-delete must not eat time a standing rule classifies.
+        let removed = clear_untagged(&conn).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(count(&conn, "segments"), 1);
+    }
+
+    #[test]
+    fn deleting_a_project_takes_its_rules_and_exceptions_with_it() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        write_exception(&conn, d, "dev.warp", "", p.id).unwrap();
+
+        delete_project(&conn, p.id).unwrap();
+
+        assert!(list_rules(&conn).unwrap().is_empty());
+        assert_eq!(count(&conn, "assignment_exceptions"), 0);
+    }
+
+    #[test]
+    fn day_view_shows_rule_provenance_and_exceptions() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), Some("x"));
+        seg(
+            &conn,
+            s + 100,
+            s + 200,
+            Some("com.zen"),
+            Some("Zen"),
+            Some("y"),
+        );
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        write_exception(&conn, d, "com.zen", "", p.id).unwrap();
+
+        let view = day_view(&conn, d).unwrap();
+        let warp = view.apps.iter().find(|a| a.app_key == "dev.warp").unwrap();
+        assert_eq!(warp.projects.len(), 1);
+        assert_eq!(warp.projects[0].state, LinkState::Rule);
+        assert!(warp.projects[0].rule_id.is_some());
+        // Titles render inheritance by absence — the dot lives on the app row.
+        assert!(warp.titles[0].projects.is_empty());
+
+        let zen = view.apps.iter().find(|a| a.app_key == "com.zen").unwrap();
+        assert_eq!(zen.projects[0].state, LinkState::Excluded);
+    }
+
+    #[test]
+    fn project_day_receipt_decomposes_one_day_with_reasons() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let other = "2026-04-02";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), Some("x"));
+        seg(
+            &conn,
+            s + 100,
+            s + 160,
+            Some("com.zen"),
+            Some("Zen"),
+            Some("y"),
+        );
+        seg(
+            &conn,
+            day_start_ts(other),
+            day_start_ts(other) + 500,
+            Some("dev.warp"),
+            Some("Warp"),
+            Some("x"),
+        );
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        add_assignment(&conn, d, "com.zen", "y", p.id).unwrap();
+
+        let entries = project_day_entries(&conn, p.id, d).unwrap();
+
+        // Only this day, biggest first, each saying why it is here.
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].app_key, "dev.warp");
+        assert_eq!(entries[0].seconds, 100);
+        assert_eq!(entries[0].state, LinkState::Rule);
+        assert!(entries[0].rule_id.is_some());
+        assert_eq!(entries[1].app_key, "com.zen");
+        assert_eq!(entries[1].title, "y");
+        assert_eq!(entries[1].state, LinkState::Direct);
+    }
+
+    #[test]
+    fn excluding_a_hand_made_link_just_deletes_it() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), None);
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        add_assignment(&conn, d, "dev.warp", "", p.id).unwrap();
+
+        exclude_for_day(&conn, d, "dev.warp", "", p.id).unwrap();
+
+        // Nothing would bring it back, so no "no" is worth recording: the row
+        // is Undecided again and behaves exactly as it did before rules.
+        assert!(project_breakdown(&conn, p.id).unwrap().is_empty());
+        assert_eq!(count(&conn, "assignment_exceptions"), 0);
+    }
+
+    #[test]
+    fn excluding_a_rule_covered_row_records_an_exception() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), None);
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+
+        exclude_for_day(&conn, d, "dev.warp", "", p.id).unwrap();
+
+        assert!(project_breakdown(&conn, p.id).unwrap().is_empty());
+        assert_eq!(count(&conn, "assignment_exceptions"), 1);
+    }
+
+    #[test]
+    fn excluding_an_inherited_title_records_an_exception() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.zen"),
+            Some("Zen"),
+            Some("keep"),
+        );
+        seg(
+            &conn,
+            s + 100,
+            s + 160,
+            Some("com.zen"),
+            Some("Zen"),
+            Some("go"),
+        );
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        add_assignment(&conn, d, "com.zen", "", p.id).unwrap();
+
+        exclude_for_day(&conn, d, "com.zen", "go", p.id).unwrap();
+
+        assert_eq!(count(&conn, "assignment_exceptions"), 1);
+        assert_eq!(project_breakdown(&conn, p.id).unwrap()[0].seconds, 100);
+    }
+
+    #[test]
+    fn tracked_apps_lists_busiest_first_and_skips_ignored() {
+        let conn = mem();
+        let s = day_start_ts("2026-04-01");
+        seg(&conn, s, s + 50, Some("com.small"), Some("Small"), None);
+        seg(
+            &conn,
+            s + 50,
+            s + 250,
+            Some("com.big"),
+            Some("Big"),
+            Some("a"),
+        );
+        seg(
+            &conn,
+            s + 250,
+            s + 300,
+            Some("com.big"),
+            Some("Big"),
+            Some("b"),
+        );
+        seg(
+            &conn,
+            s + 300,
+            s + 900,
+            Some("com.noise"),
+            Some("Noise"),
+            None,
+        );
+        add_ignored_entry(&conn, "com.noise", Some("Noise"), "").unwrap();
+
+        let apps = tracked_apps(&conn).unwrap();
+
+        // Ignored activity is not a candidate for a rule, and the busiest app
+        // is the one you are most likely to want a rule for.
+        assert_eq!(
+            apps.iter().map(|a| a.app_key.as_str()).collect::<Vec<_>>(),
+            vec!["com.big", "com.small"]
+        );
+        assert_eq!(apps[0].app_name, "Big");
+        assert_eq!(apps[0].seconds, 250);
+    }
+
+    #[test]
+    fn an_excluded_rule_row_reads_as_excluded_not_as_included() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), Some("x"));
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+
+        exclude_for_day(&conn, d, "dev.warp", "", p.id).unwrap();
+
+        // The exception must REPLACE the rule link, not sit beside it: two
+        // entries for one project would fold back to "included via rule" and
+        // the dot would stop responding.
+        let view = day_view(&conn, d).unwrap();
+        let warp = view.apps.iter().find(|a| a.app_key == "dev.warp").unwrap();
+        assert_eq!(warp.projects.len(), 1);
+        assert_eq!(warp.projects[0].state, LinkState::Excluded);
+        assert!(project_breakdown(&conn, p.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn removing_an_inherited_title_from_a_project_makes_it_stick() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.zen"),
+            Some("Zen"),
+            Some("keep"),
+        );
+        seg(
+            &conn,
+            s + 100,
+            s + 160,
+            Some("com.zen"),
+            Some("Zen"),
+            Some("go"),
+        );
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        add_assignment(&conn, d, "com.zen", "", p.id).unwrap();
+
+        // "go" is in the project only by inheriting the app-level tag, so there
+        // is no row to delete — removal has to record an exception instead.
+        let vetoed = remove_from_project(&conn, p.id, "com.zen", Some("go")).unwrap();
+
+        assert_eq!(vetoed, 1);
+        assert_eq!(project_breakdown(&conn, p.id).unwrap()[0].seconds, 100);
+    }
+
+    #[test]
+    fn removing_a_rule_covered_app_from_a_project_makes_it_stick() {
+        let conn = mem();
+        for d in ["2026-04-01", "2026-04-02"] {
+            seg(
+                &conn,
+                day_start_ts(d),
+                day_start_ts(d) + 100,
+                Some("dev.warp"),
+                Some("Warp"),
+                None,
+            );
+        }
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+
+        let vetoed = remove_from_project(&conn, p.id, "dev.warp", None).unwrap();
+
+        // Both days excepted; the rule survives for anything else it covers.
+        assert_eq!(vetoed, 2);
+        assert!(project_breakdown(&conn, p.id).unwrap().is_empty());
+        assert_eq!(list_rules(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reset_everything_leaves_no_rules_or_exceptions_behind() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        write_exception(&conn, d, "dev.warp", "", p.id).unwrap();
+
+        reset_everything(&conn).unwrap();
+
+        // SQLite reuses rowids, so a surviving rule would graft itself onto
+        // whatever project is created next.
+        assert_eq!(count(&conn, "assignment_rules"), 0);
+        assert_eq!(count(&conn, "assignment_exceptions"), 0);
+    }
+
+    #[test]
+    fn clearing_tracking_data_clears_both_polarities() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let p = create_project(&conn, "Flowstate", "#fff").unwrap();
+        add_assignment(&conn, d, "com.a", "", p.id).unwrap();
+        write_exception(&conn, d, "com.b", "", p.id).unwrap();
+
+        clear_tracking_data(&conn).unwrap();
+
+        // A yes and a no are the same dated statement; neither may outlive it.
+        assert_eq!(count(&conn, "day_assignments"), 0);
+        assert_eq!(count(&conn, "assignment_exceptions"), 0);
+        assert_eq!(list_projects(&conn).unwrap().len(), 1);
     }
 }

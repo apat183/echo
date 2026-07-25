@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { DayView } from "./api";
+import type { DayView, RowProject } from "./api";
 import { mergeDayViews, partitionTitles, type PeriodTitleUsage } from "./merge";
+
+function direct(id: number): RowProject {
+  return { project_id: id, state: "direct", rule_id: null };
+}
 
 function hours(hourIdx: number, seconds: number): number[] {
   const h = Array.from({ length: 24 }, () => 0);
@@ -11,7 +15,7 @@ function hours(hourIdx: number, seconds: number): number[] {
 function day(
   date: string,
   seconds: number,
-  projectIds: number[],
+  projects: RowProject[],
   hourIdx: number
 ): DayView {
   return {
@@ -25,8 +29,8 @@ function day(
         bundle_id: "com.a",
         seconds,
         hours: hours(hourIdx, seconds),
-        project_ids: projectIds,
-        titles: [{ title: "doc", seconds, project_ids: projectIds }],
+        projects,
+        titles: [{ title: "doc", seconds, projects }],
       },
     ],
   };
@@ -35,7 +39,7 @@ function day(
 describe("mergeDayViews", () => {
   it("sums app and title time and hours across days, collecting project days", () => {
     const merged = mergeDayViews(
-      [day("2026-06-09", 100, [1], 9), day("2026-06-10", 50, [1], 10)],
+      [day("2026-06-09", 100, [direct(1)], 9), day("2026-06-10", 50, [direct(1)], 10)],
       "week",
       "2026-06-10"
     );
@@ -46,7 +50,15 @@ describe("mergeDayViews", () => {
     const app = merged.apps[0];
     expect(app.seconds).toBe(150);
     expect(app.dates).toEqual(["2026-06-09", "2026-06-10"]);
-    expect(app.projects).toEqual([{ id: 1, dates: ["2026-06-09", "2026-06-10"] }]);
+    expect(app.projects).toEqual([
+      {
+        id: 1,
+        state: "direct",
+        ruleId: null,
+        includedDates: ["2026-06-09", "2026-06-10"],
+        excludedDates: [],
+      },
+    ]);
     expect(app.hours[9]).toBe(100);
     expect(app.hours[10]).toBe(50);
     expect(merged.timeline.map((b) => [b.key, b.seconds])).toEqual([
@@ -70,7 +82,15 @@ describe("mergeDayViews", () => {
 
     expect(app.titles).toHaveLength(1);
     expect(app.titles[0]).toMatchObject({ title: "doc", seconds: 150 });
-    expect(app.titles[0].projects).toEqual([{ id: 1, dates: ["2026-06-09", "2026-06-10"] }]);
+    expect(app.titles[0].projects).toEqual([
+      {
+        id: 1,
+        state: "direct",
+        ruleId: null,
+        includedDates: ["2026-06-09", "2026-06-10"],
+        excludedDates: [],
+      },
+    ]);
   });
 
   it("leaves projects empty when nothing is assigned", () => {
@@ -79,7 +99,7 @@ describe("mergeDayViews", () => {
     expect(merged.apps[0].titles[0].projects).toEqual([]);
   });
 
-  it("accumulates multiple project_ids on app and title into separate RowProjects", () => {
+  it("accumulates several projects on one row into separate RowProjects", () => {
     const view: DayView = {
       date: "2026-06-10",
       total_seconds: 120,
@@ -91,8 +111,8 @@ describe("mergeDayViews", () => {
           bundle_id: "com.b",
           seconds: 120,
           hours: hours(9, 120),
-          project_ids: [1, 2],
-          titles: [{ title: "report", seconds: 120, project_ids: [1, 2] }],
+          projects: [direct(1), direct(2)],
+          titles: [{ title: "report", seconds: 120, projects: [direct(1), direct(2)] }],
         },
       ],
     };
@@ -100,13 +120,51 @@ describe("mergeDayViews", () => {
     const merged = mergeDayViews([view], "day", "2026-06-10");
     const app = merged.apps[0];
 
-    expect(app.projects).toEqual([
-      { id: 1, dates: ["2026-06-10"] },
-      { id: 2, dates: ["2026-06-10"] },
+    expect(app.projects.map((p) => p.id)).toEqual([1, 2]);
+    expect(app.titles[0].projects.map((p) => p.id)).toEqual([1, 2]);
+  });
+
+  it("prefers a hand-made link over a rule when folding a period", () => {
+    const merged = mergeDayViews(
+      [
+        day("2026-06-09", 100, [{ project_id: 1, state: "rule", rule_id: 7 }], 9),
+        day("2026-06-10", 50, [direct(1)], 10),
+      ],
+      "week",
+      "2026-06-10"
+    );
+
+    // One dot for the period. It offers to undo the thing you did by hand,
+    // so it must read as direct even though most days came from the rule.
+    expect(merged.apps[0].projects).toEqual([
+      {
+        id: 1,
+        state: "direct",
+        ruleId: 7,
+        includedDates: ["2026-06-09", "2026-06-10"],
+        excludedDates: [],
+      },
     ]);
-    expect(app.titles[0].projects).toEqual([
-      { id: 1, dates: ["2026-06-10"] },
-      { id: 2, dates: ["2026-06-10"] },
+  });
+
+  it("keeps excluded days separate so clearing acts only on them", () => {
+    const merged = mergeDayViews(
+      [
+        day("2026-06-09", 100, [{ project_id: 1, state: "excluded", rule_id: null }], 9),
+        day("2026-06-10", 50, [{ project_id: 1, state: "excluded", rule_id: null }], 10),
+      ],
+      "week",
+      "2026-06-10"
+    );
+
+    expect(merged.apps[0].projects).toEqual([
+      {
+        id: 1,
+        state: "excluded",
+        ruleId: null,
+        includedDates: [],
+        excludedDates: ["2026-06-09", "2026-06-10"],
+      },
     ]);
   });
 });
