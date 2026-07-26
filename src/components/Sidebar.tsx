@@ -152,7 +152,7 @@ export function Sidebar(props: {
       <div className="sidebar-bottom">
         <button
           type="button"
-          className={`nav-item ignore-target ${
+          className={`nav-item nav-tool ignore-target ${
             selection.kind === "ignored" ? "active" : ""
           } ${ignoreOver ? "drop-over" : ""}`}
           title="Ignore dragged activity"
@@ -185,7 +185,7 @@ export function Sidebar(props: {
             });
           }}
         >
-          <span className="ignore-icon">
+          <span className="nav-tool-icon">
             <Ban size={16} />
           </span>
           {!collapsed && <span>Ignore</span>}
@@ -193,11 +193,11 @@ export function Sidebar(props: {
 
         <button
           type="button"
-          className={`nav-item rules-nav ${selection.kind === "rules" ? "active" : ""}`}
+          className={`nav-item nav-tool ${selection.kind === "rules" ? "active" : ""}`}
           title="Rules"
           onClick={() => onSelect({ kind: "rules" })}
         >
-          <span className="settings-icon">
+          <span className="nav-tool-icon">
             <Wand2 size={16} />
           </span>
           {!collapsed && <span>Rules</span>}
@@ -205,11 +205,11 @@ export function Sidebar(props: {
 
         <button
           type="button"
-          className={`nav-item settings-nav ${selection.kind === "settings" ? "active" : ""}`}
+          className={`nav-item nav-tool ${selection.kind === "settings" ? "active" : ""}`}
           title="Settings"
           onClick={() => onSelect({ kind: "settings" })}
         >
-          <span className="settings-icon">
+          <span className="nav-tool-icon">
             <Settings size={16} />
           </span>
           {!collapsed && <span>Settings</span>}
@@ -217,11 +217,11 @@ export function Sidebar(props: {
 
         <button
           type="button"
-          className="nav-item collapse-nav"
+          className="nav-item nav-tool"
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           onClick={toggleCollapsed}
         >
-          <span className="collapse-icon">
+          <span className="nav-tool-icon">
             {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
           </span>
           {!collapsed && <span>{collapsed ? "Expand" : "Collapse"}</span>}
