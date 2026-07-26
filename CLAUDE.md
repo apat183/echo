@@ -83,9 +83,38 @@ The update flow is Rust-owned in `updater.rs`, mirroring existing patterns: the 
 ### Adding a Tauri command
 
 1. Write the `db.rs` function (pure, takes `&Connection`).
-2. Add a `#[tauri::command]` wrapper in `lib.rs` that locks `DbState` and maps errors to `String`.
+2. Add a **`#[tauri::command(async)]`** wrapper in `lib.rs` that locks `DbState` and maps errors to `String`.
 3. Register it in the `generate_handler!` list in `lib.rs`.
 4. Add the typed wrapper + any shared types in `src/api.ts`.
+
+**Always `(async)`, never a bare `#[tauri::command]`.** A plain sync command runs
+its body on the **main thread**, so anything that locks the DB, scans segments or
+touches AppKit freezes the UI for its whole duration. The annotation costs a task
+dispatch; omitting it on a command that later grows a table scan costs a visible
+hang. `install_update` is exempt only because it is already an `async fn`.
+
+### Performance instrumentation
+
+`perf.rs` holds opt-in startup timing, off unless `ECHO_PERF=1`. Run the bundled
+app with it to get an elapsed-since-process-start trace of DB open, autodelete,
+time-to-first-IPC, and per-icon / per-`day_view` cost:
+
+```sh
+bun run tauri build --bundles app
+ECHO_PERF=1 ./src-tauri/target/release/bundle/macos/Echo.app/Contents/MacOS/echo
+```
+
+Measure the **bundled** app, not `cargo run`: a bare binary has no `Info.plist`,
+so WKWebView never starts and no IPC is ever issued. A debug build also skews the
+picture — release is 10-100x faster on the resolve loops and `updater.rs` skips
+its periodic check outside release.
+
+App icons are the cautionary tale. `NSWorkspace::iconForFile` returns a *lazy*
+NSImage holding every `.icns` representation up to 1024²; calling
+`TIFFRepresentation()` on it rasterises all of them (~350 ms) before the PNG
+encode (~150 ms). At ~50 tracked apps on the main thread that was an ~8 s cold-start
+freeze. `platform_app_icon_data_url` now asks for a `CGImage` at the size actually
+drawn (`ICON_PX`), which is ~5 ms and ~20 KB per icon.
 
 ## Notes
 

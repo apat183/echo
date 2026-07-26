@@ -230,15 +230,14 @@ body {
   gap: 3px;
 }
 
-.ignore-target,
-.settings-nav,
-.collapse-nav {
+/* Footer tool rows (Ignore / Rules / Settings / Collapse). Every such button
+   carries `.nav-tool` and its glyph `.nav-tool-icon`, so adding a new one
+   inherits the dim-until-hover treatment without editing a selector list. */
+.nav-tool {
   color: var(--text-dim);
 }
 
-.ignore-icon,
-.settings-icon,
-.collapse-icon {
+.nav-tool-icon {
   width: 22px;
   height: 22px;
   border-radius: 6px;
@@ -249,16 +248,12 @@ body {
   background: var(--hover);
 }
 
-.ignore-target.drop-over .ignore-icon,
-.ignore-target:hover .ignore-icon,
-.settings-nav:hover .settings-icon,
-.collapse-nav:hover .collapse-icon {
+.nav-tool:hover .nav-tool-icon,
+.ignore-target.drop-over .nav-tool-icon {
   color: var(--text);
 }
 
-.sidebar.collapsed .ignore-icon,
-.sidebar.collapsed .settings-icon,
-.sidebar.collapsed .collapse-icon {
+.sidebar.collapsed .nav-tool-icon {
   width: 30px;
   height: 30px;
 }
