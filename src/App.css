@@ -1407,7 +1407,8 @@ body {
   background: var(--hover);
 }
 
-.rule-form select {
+.rule-form select,
+.rule-form-title {
   flex: 1 1 180px;
   min-width: 0;
   padding: 6px 8px;
@@ -1418,9 +1419,24 @@ body {
   border-radius: 7px;
 }
 
+.rule-form-title:disabled {
+  opacity: 0.5;
+}
+
 .rule-form-arrow {
   color: var(--text-dim);
   flex: none;
+}
+
+/* The pattern's reach, sitting under the form on its own line. */
+.rule-form-reach {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+.rule-title-pattern {
+  color: var(--text-dim);
+  font-weight: 400;
 }
 
 .rule-form-retro {

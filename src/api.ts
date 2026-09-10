@@ -55,14 +55,29 @@ export type TrackedApp = {
   seconds: number;
 };
 
+// Mirrors `TrackedTitle` in src-tauri/src/db.rs; keep the two in sync.
+export type TrackedTitle = {
+  title: string;
+  seconds: number;
+};
+
 // Mirrors `AssignmentRule` in src-tauri/src/db.rs; keep the two in sync.
 export type AssignmentRule = {
   id: number;
   project_id: number;
   app_key: string;
   app_name: string | null;
+  title: string; // "" = the whole app; else a case-insensitive substring
   effective_from: string | null; // null = reaches all history
 };
+
+/** Does a rule's title pattern cover this title? The one definition of the
+ *  match, mirroring `Resolver::title_rule_links` in src-tauri/src/db.rs —
+ *  case-insensitive and partial, because titles are transient (ADR 0003). */
+export function titleMatches(pattern: string, title: string): boolean {
+  const needle = pattern.trim().toLowerCase();
+  return needle !== "" && title.toLowerCase().includes(needle);
+}
 
 // Mirrors `ReceiptEntry` in src-tauri/src/db.rs; keep the two in sync.
 export type ReceiptEntry = {
@@ -125,13 +140,16 @@ export const api = {
   removeFromProject: (projectId: number, appKey: string, title: string | null) =>
     invoke<number>("remove_from_project", { projectId, appKey, title }),
   trackedApps: () => invoke<TrackedApp[]>("tracked_apps"),
+  /** Every title one app has shown, busiest first — seeds a rule's pattern. */
+  trackedTitles: (appKey: string) => invoke<TrackedTitle[]>("tracked_titles", { appKey }),
   listRules: () => invoke<AssignmentRule[]>("list_rules"),
   createRule: (
     projectId: number,
     appKey: string,
     appName: string | null,
+    title: string,
     effectiveFrom: string | null,
-  ) => invoke<AssignmentRule>("create_rule", { projectId, appKey, appName, effectiveFrom }),
+  ) => invoke<AssignmentRule>("create_rule", { projectId, appKey, appName, title, effectiveFrom }),
   deleteRule: (id: number) => invoke<void>("delete_rule", { id }),
   /** Take a row out of a project for one day; records an Exception only if a
    *  rule or app-level assignment would otherwise put it straight back. */

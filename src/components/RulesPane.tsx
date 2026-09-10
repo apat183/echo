@@ -1,7 +1,8 @@
 // Rules view: the one place standing assignment rules are written, listed and
-// deleted. A rule says "this app's time is always that project" and is resolved
-// when time is read, so it applies to every day at once — including days
-// already tracked, unless it is created forward-only (see docs/adr/0001).
+// deleted. A rule says "this app's time is always that project" — or, with a
+// title pattern, "these windows of this app are" — and is resolved when time is
+// read, so it applies to every day at once, including days already tracked,
+// unless it is created forward-only (docs/adr/0001, docs/adr/0003).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Plus, Wand2, X } from "lucide-react";
@@ -10,10 +11,12 @@ import {
   appColor,
   fmtDur,
   initials,
+  titleMatches,
   toDateStr,
   type AssignmentRule,
   type Project,
   type TrackedApp,
+  type TrackedTitle,
 } from "../api";
 import { loadAppIcon } from "../appIcon";
 
@@ -26,6 +29,8 @@ export function RulesPane(props: {
   const [rules, setRules] = useState<AssignmentRule[]>([]);
   const [apps, setApps] = useState<TrackedApp[]>([]);
   const [appKey, setAppKey] = useState("");
+  const [titles, setTitles] = useState<TrackedTitle[]>([]);
+  const [pattern, setPattern] = useState("");
   const [projectId, setProjectId] = useState<number | "">("");
   const [retroactive, setRetroactive] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -45,6 +50,29 @@ export function RulesPane(props: {
   );
   const appByKey = useMemo(() => new Map(apps.map((a) => [a.app_key, a])), [apps]);
 
+  // The picker's titles double as the blast-radius preview: a pattern's reach
+  // is unguessable, so say what it catches before the rule is written.
+  useEffect(() => {
+    setPattern("");
+    if (appKey === "") {
+      setTitles([]);
+      return;
+    }
+    let alive = true;
+    api
+      .trackedTitles(appKey)
+      .then((t) => alive && setTitles(t))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [appKey, refreshKey]);
+
+  const reach = useMemo(() => {
+    const hits = titles.filter((t) => titleMatches(pattern, t.title));
+    return { count: hits.length, seconds: hits.reduce((sum, t) => sum + t.seconds, 0) };
+  }, [titles, pattern]);
+
   const canAdd = appKey !== "" && projectId !== "" && !busy;
 
   async function addRule() {
@@ -54,7 +82,13 @@ export function RulesPane(props: {
       // Forward-only rules are stamped with today; a retroactive rule carries no
       // date at all and so reaches everything already tracked.
       const from = retroactive ? null : toDateStr(new Date());
-      await api.createRule(projectId, appKey, appByKey.get(appKey)?.app_name ?? null, from);
+      await api.createRule(
+        projectId,
+        appKey,
+        appByKey.get(appKey)?.app_name ?? null,
+        pattern,
+        from
+      );
       setAppKey("");
       load();
       onChanged();
@@ -64,7 +98,8 @@ export function RulesPane(props: {
   }
 
   async function removeRule(rule: AssignmentRule) {
-    const name = rule.app_name || rule.app_key;
+    const app = rule.app_name || rule.app_key;
+    const name = rule.title ? `${app} windows matching “${rule.title}”` : app;
     const project = projectById.get(rule.project_id)?.name ?? "this project";
     if (
       !window.confirm(
@@ -94,7 +129,8 @@ export function RulesPane(props: {
       <div className="pane-body">
         <p className="usage-sub rules-intro">
           A rule sends an app's time to a project on every day, so you stop dragging
-          the same thing over and over.
+          the same thing over and over. Narrow it to part of a window title to send
+          just those windows somewhere else.
         </p>
 
         <div className="rule-form">
@@ -110,6 +146,25 @@ export function RulesPane(props: {
               </option>
             ))}
           </select>
+
+          <input
+            aria-label="Window title contains"
+            list="rule-title-options"
+            className="rule-form-title"
+            placeholder={appKey === "" ? "Any window" : "Any window — or type part of a title"}
+            disabled={appKey === ""}
+            value={pattern}
+            onChange={(e) => setPattern(e.target.value)}
+          />
+          {/* Native datalist: pick a real title to seed the pattern, then trim
+              it down to the part that stays the same day to day. */}
+          <datalist id="rule-title-options">
+            {titles.slice(0, 50).map((t) => (
+              <option key={t.title} value={t.title}>
+                {fmtDur(t.seconds)}
+              </option>
+            ))}
+          </datalist>
 
           <span className="rule-form-arrow">→</span>
 
@@ -138,6 +193,14 @@ export function RulesPane(props: {
           <button type="button" className="rule-add" disabled={!canAdd} onClick={addRule}>
             <Plus size={14} /> Add rule
           </button>
+
+          {pattern.trim() !== "" && (
+            <p className="usage-sub rule-form-reach">
+              {reach.count === 0
+                ? "Matches nothing tracked so far."
+                : `Matches ${reach.count} title${reach.count === 1 ? "" : "s"} · ${fmtDur(reach.seconds)}`}
+            </p>
+          )}
         </div>
 
         <div className="project-apps">
@@ -191,7 +254,10 @@ function RuleRow(props: {
         )}
       </span>
       <span className="ignored-rule-copy">
-        <span className="project-app-name">{appName}</span>
+        <span className="project-app-name">
+          {appName}
+          {rule.title && <span className="rule-title-pattern"> · “{rule.title}”</span>}
+        </span>
         <span className="ignored-rule-subtitle">
           {rule.effective_from ? `From ${rule.effective_from}` : "All history"}
         </span>

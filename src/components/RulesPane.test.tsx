@@ -8,6 +8,7 @@ const { mockApi } = vi.hoisted(() => ({
   mockApi: {
     listRules: vi.fn(),
     trackedApps: vi.fn(),
+    trackedTitles: vi.fn(),
     createRule: vi.fn(),
     deleteRule: vi.fn(),
   },
@@ -37,11 +38,17 @@ beforeEach(() => {
   mockApi.trackedApps.mockResolvedValue([
     { app_key: "dev.warp", app_name: "Warp", bundle_id: "dev.warp", seconds: 7200 },
   ]);
+  mockApi.trackedTitles.mockResolvedValue([
+    { title: "ScriptR — Dashboard", seconds: 3600 },
+    { title: "scriptr.io | Docs", seconds: 1800 },
+    { title: "Hacker News", seconds: 900 },
+  ]);
   mockApi.createRule.mockResolvedValue({
     id: 1,
     project_id: 1,
     app_key: "dev.warp",
     app_name: "Warp",
+    title: "",
     effective_from: null,
   });
   mockApi.deleteRule.mockResolvedValue(undefined);
@@ -55,10 +62,38 @@ describe("RulesPane", () => {
     await userEvent.selectOptions(screen.getByLabelText("Project"), "1");
     await userEvent.click(screen.getByRole("button", { name: /Add rule/ }));
 
-    // A null effective date is what makes the rule reach days already tracked.
+    // A null effective date is what makes the rule reach days already tracked;
+    // an empty pattern is what makes it an app rule rather than a title one.
     await waitFor(() =>
-      expect(mockApi.createRule).toHaveBeenCalledWith(1, "dev.warp", "Warp", null)
+      expect(mockApi.createRule).toHaveBeenCalledWith(1, "dev.warp", "Warp", "", null)
     );
+  });
+
+  it("creates a title rule and previews its reach before saving", async () => {
+    renderPane();
+
+    await userEvent.selectOptions(await screen.findByLabelText("App"), "dev.warp");
+    await userEvent.selectOptions(screen.getByLabelText("Project"), "1");
+    // Lower case on purpose: the pattern matches titles case-insensitively.
+    await userEvent.type(await screen.findByLabelText("Window title contains"), "scriptr");
+
+    // Two of the three titles contain it: 1h + 30m, and Hacker News is left out.
+    expect(await screen.findByText(/Matches 2 titles/)).toBeInTheDocument();
+    expect(screen.getByText(/1h 30m/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /Add rule/ }));
+    await waitFor(() =>
+      expect(mockApi.createRule).toHaveBeenCalledWith(1, "dev.warp", "Warp", "scriptr", null)
+    );
+  });
+
+  it("says so when a pattern catches nothing tracked", async () => {
+    renderPane();
+
+    await userEvent.selectOptions(await screen.findByLabelText("App"), "dev.warp");
+    await userEvent.type(await screen.findByLabelText("Window title contains"), "zzz");
+
+    expect(await screen.findByText(/Matches nothing tracked so far/)).toBeInTheDocument();
   });
 
   it("stamps today's date when the rule is forward-only", async () => {
@@ -70,7 +105,7 @@ describe("RulesPane", () => {
     await userEvent.click(screen.getByRole("button", { name: /Add rule/ }));
 
     await waitFor(() => expect(mockApi.createRule).toHaveBeenCalledTimes(1));
-    const [, , , effectiveFrom] = mockApi.createRule.mock.calls[0];
+    const [, , , , effectiveFrom] = mockApi.createRule.mock.calls[0];
     expect(effectiveFrom).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
@@ -91,7 +126,14 @@ describe("RulesPane", () => {
     const confirmSpy = vi.fn(() => true);
     vi.stubGlobal("confirm", confirmSpy);
     mockApi.listRules.mockResolvedValue([
-      { id: 3, project_id: 1, app_key: "dev.warp", app_name: "Warp", effective_from: null },
+      {
+        id: 3,
+        project_id: 1,
+        app_key: "dev.warp",
+        app_name: "Warp",
+        title: "",
+        effective_from: null,
+      },
     ]);
     renderPane();
 
@@ -109,6 +151,7 @@ describe("RulesPane", () => {
         project_id: 2,
         app_key: "com.zen",
         app_name: "Zen",
+        title: "",
         effective_from: "2026-07-01",
       },
     ]);
@@ -116,5 +159,21 @@ describe("RulesPane", () => {
 
     expect(await screen.findByText("From 2026-07-01")).toBeInTheDocument();
     expect(screen.queryByText("All history")).not.toBeInTheDocument();
+  });
+
+  it("shows a title rule's pattern in the list", async () => {
+    mockApi.listRules.mockResolvedValue([
+      {
+        id: 5,
+        project_id: 1,
+        app_key: "dev.warp",
+        app_name: "Warp",
+        title: "ScriptR",
+        effective_from: null,
+      },
+    ]);
+    renderPane();
+
+    expect(await screen.findByText(/“ScriptR”/)).toBeInTheDocument();
   });
 });

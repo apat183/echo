@@ -7,6 +7,9 @@
 //!                   (drag = "just that day", #7); one app/title can be tagged with
 //!                   several projects and each is billed the full duration
 //!   ignored_entries app/title rules excluded from activity totals and projects
+//!   assignment_rules standing app-or-title-pattern -> project instructions,
+//!                   resolved when time is read (ADR 0001, ADR 0003)
+//!   assignment_exceptions dated "this is NOT that project" decisions (ADR 0002)
 //!   project_period_notes per-project notes attached to day/week/month rollups
 //!
 //! All time aggregation attributes a segment to the LOCAL date of its start, so the
@@ -112,8 +115,9 @@ pub struct ProjectApp {
 
 /// A standing instruction that an app's time belongs to a project (ADR 0001).
 /// `effective_from` is a *gate*: `None` reaches all history, `Some(date)` holds
-/// only from that local date onward. Subject is the app alone in version one;
-/// a title subject arrives as a further nullable column.
+/// only from that local date onward. Subject is the app plus, optionally, a
+/// *title pattern*: `""` is an app rule, anything else matches a window title
+/// case-insensitively by substring and outranks the app rules (ADR 0003).
 /// Mirrors `AssignmentRule` in src/api.ts; keep the two in sync.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AssignmentRule {
@@ -121,7 +125,16 @@ pub struct AssignmentRule {
     pub project_id: i64,
     pub app_key: String,
     pub app_name: Option<String>,
+    pub title: String, // "" = the whole app; else a case-insensitive substring
     pub effective_from: Option<String>,
+}
+
+/// One window title an app has actually shown, offered to seed a rule's title
+/// pattern. Mirrors `TrackedTitle` in src/api.ts; keep the two in sync.
+#[derive(Debug, Serialize)]
+pub struct TrackedTitle {
+    pub title: String,
+    pub seconds: i64,
 }
 
 /// An app that has been tracked, offered as a subject when writing a rule.
@@ -212,6 +225,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     migrate_projects_sort_order(&conn)?;
     migrate_ignored_entries_app_name(&conn)?;
     migrate_add_rule_tables(&conn)?;
+    migrate_assignment_rules_title(&conn)?;
     Ok(conn)
 }
 
@@ -226,6 +240,8 @@ fn migrate_add_rule_tables(conn: &Connection) -> rusqlite::Result<()> {
             project_id     INTEGER NOT NULL,
             app_key        TEXT NOT NULL,
             app_name       TEXT,           -- display only; the key is what matches
+            title          TEXT NOT NULL DEFAULT '',  -- '' = whole app; else a
+                                           -- case-insensitive substring (ADR 0003)
             effective_from TEXT,           -- NULL = reaches all history
             created_at     INTEGER NOT NULL
         );
@@ -352,6 +368,27 @@ fn migrate_ignored_entries_app_name(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !has_app_name {
         conn.execute_batch("ALTER TABLE ignored_entries ADD COLUMN app_name TEXT;")?;
+    }
+    Ok(())
+}
+
+/// Rule tables predating title patterns (ADR 0003) key rules by app alone.
+/// Existing rows become app rules, which is what they already were.
+fn migrate_assignment_rules_title(conn: &Connection) -> rusqlite::Result<()> {
+    let mut has_title = false;
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(assignment_rules)")?;
+        let cols = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for c in cols {
+            if c? == "title" {
+                has_title = true;
+            }
+        }
+    }
+    if !has_title {
+        conn.execute_batch(
+            "ALTER TABLE assignment_rules ADD COLUMN title TEXT NOT NULL DEFAULT '';",
+        )?;
     }
     Ok(())
 }
@@ -562,15 +599,21 @@ pub fn create_rule(
     project_id: i64,
     app_key: &str,
     app_name: Option<&str>,
+    title: &str,
     effective_from: Option<&str>,
 ) -> rusqlite::Result<AssignmentRule> {
+    // Surrounding whitespace is never what the user meant to match on, and a
+    // blank pattern is how an app rule is written.
+    let title = title.trim();
     conn.execute(
-        "INSERT INTO assignment_rules (project_id, app_key, app_name, effective_from, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO assignment_rules
+            (project_id, app_key, app_name, title, effective_from, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![
             project_id,
             app_key,
             app_name,
+            title,
             effective_from,
             Local::now().timestamp()
         ],
@@ -580,13 +623,14 @@ pub fn create_rule(
         project_id,
         app_key: app_key.to_string(),
         app_name: app_name.map(str::to_string),
+        title: title.to_string(),
         effective_from: effective_from.map(str::to_string),
     })
 }
 
 pub fn list_rules(conn: &Connection) -> rusqlite::Result<Vec<AssignmentRule>> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, app_key, app_name, effective_from
+        "SELECT id, project_id, app_key, app_name, title, effective_from
          FROM assignment_rules ORDER BY id ASC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -595,7 +639,8 @@ pub fn list_rules(conn: &Connection) -> rusqlite::Result<Vec<AssignmentRule>> {
             project_id: r.get(1)?,
             app_key: r.get(2)?,
             app_name: r.get(3)?,
-            effective_from: r.get(4)?,
+            title: r.get(4)?,
+            effective_from: r.get(5)?,
         })
     })?;
     rows.collect()
@@ -825,7 +870,8 @@ pub struct RowProject {
 /// Everything needed to decide which projects a segment bills to, loaded once
 /// and consulted in one place. Resolution walks the four rungs of ADR 0001:
 /// `day-title > day-app > rule-title > rule-app`, stopping at the first that
-/// speaks. Version one has no title-subject rules, so the third rung is empty.
+/// speaks. A title rule therefore *shadows* the app rules of the same app for
+/// the titles it matches, rather than stacking with them (ADR 0003).
 ///
 /// A row's own statements come in two polarities that are mutually exclusive
 /// per project: an assignment (yes) and an exception (no). Writing one clears
@@ -835,9 +881,12 @@ struct Resolver {
     assigned: HashMap<(String, String, String), Vec<i64>>,
     /// (date, app_key, title) → projects excepted, ascending.
     excepted: HashMap<(String, String, String), Vec<i64>>,
-    /// Date-less standing rules grouped by subject app, app-subject only in
-    /// version one. Each group is deduped so one project bills once.
-    rules: HashMap<String, Vec<AssignmentRule>>,
+    /// Date-less standing app rules (rung four) grouped by subject app. Each
+    /// group is deduped so one project bills once.
+    app_rules: HashMap<String, Vec<AssignmentRule>>,
+    /// Date-less standing title rules (rung three) grouped by subject app,
+    /// each paired with its pattern pre-lowercased for matching.
+    title_rules: HashMap<String, Vec<(String, AssignmentRule)>>,
 }
 
 impl Resolver {
@@ -879,20 +928,37 @@ impl Resolver {
     {
         // Rules are grouped by subject once, so the hot path — resolving every
         // segment in the database — is a single map probe rather than a scan,
-        // sort and dedup of every rule per segment.
+        // sort and dedup of every rule per segment. The two rungs are split
+        // here too, so resolving never re-partitions them per segment.
         let mut by_app: HashMap<String, Vec<AssignmentRule>> = HashMap::new();
+        let mut by_title: HashMap<String, Vec<(String, AssignmentRule)>> = HashMap::new();
         for rule in rules {
-            by_app.entry(rule.app_key.clone()).or_default().push(rule);
+            if rule.title.is_empty() {
+                by_app.entry(rule.app_key.clone()).or_default().push(rule);
+            } else {
+                by_title
+                    .entry(rule.app_key.clone())
+                    .or_default()
+                    .push((rule.title.to_lowercase(), rule));
+            }
         }
         for group in by_app.values_mut() {
             group.sort_by_key(|rule| (rule.project_id, rule.id));
             // Several rules may name the same project; bill it once.
             group.dedup_by_key(|rule| rule.project_id);
         }
+        for group in by_title.values_mut() {
+            group.sort_by(|a, b| {
+                (&a.0, a.1.project_id, a.1.id).cmp(&(&b.0, b.1.project_id, b.1.id))
+            });
+            // Same pattern, same project, twice over: bill it once.
+            group.dedup_by(|a, b| a.0 == b.0 && a.1.project_id == b.1.project_id);
+        }
         Ok(Self {
             assigned: Self::collect(assigned)?,
             excepted: Self::collect(excepted)?,
-            rules: by_app,
+            app_rules: by_app,
+            title_rules: by_title,
         })
     }
 
@@ -918,7 +984,7 @@ impl Resolver {
     /// True when nothing anywhere could attach a project to a segment, letting
     /// the project rollups skip reading segments at all.
     fn is_empty(&self) -> bool {
-        self.assigned.is_empty() && self.rules.is_empty()
+        self.assigned.is_empty() && self.app_rules.is_empty() && self.title_rules.is_empty()
     }
 
     fn lookup<'a>(
@@ -942,24 +1008,48 @@ impl Resolver {
         Self::lookup(&self.excepted, date, app_key, title)
     }
 
-    /// Standing rules whose subject is this app and whose gates are open on
-    /// `date`. A rule with no `effective_from` reaches all history (ADR 0001).
-    fn rule_links(&self, date: &str, app_key: &str) -> Vec<RowProject> {
-        let Some(group) = self.rules.get(app_key) else {
+    /// Is this rule's gate open on `date`? A rule with no `effective_from`
+    /// reaches all history (ADR 0001).
+    fn gate_open(rule: &AssignmentRule, date: &str) -> bool {
+        rule.effective_from
+            .as_deref()
+            .is_none_or(|from| date >= from)
+    }
+
+    fn rule_link(rule: &AssignmentRule) -> RowProject {
+        RowProject {
+            project_id: rule.project_id,
+            state: LinkState::Rule,
+            rule_id: Some(rule.id),
+        }
+    }
+
+    /// Rung four: standing rules whose subject is the whole app.
+    fn app_rule_links(&self, date: &str, app_key: &str) -> Vec<RowProject> {
+        let Some(group) = self.app_rules.get(app_key) else {
             return Vec::new();
         };
         group
             .iter()
-            .filter(|rule| {
-                rule.effective_from
-                    .as_deref()
-                    .is_none_or(|from| date >= from)
-            })
-            .map(|rule| RowProject {
-                project_id: rule.project_id,
-                state: LinkState::Rule,
-                rule_id: Some(rule.id),
-            })
+            .filter(|rule| Self::gate_open(rule, date))
+            .map(Self::rule_link)
+            .collect()
+    }
+
+    /// Rung three: standing rules whose subject is a title pattern of this app.
+    /// Matching is case-insensitive and partial, because window titles are
+    /// transient (ADR 0003). A pattern is never empty, so an untitled segment
+    /// matches nothing here and falls through to the app rules.
+    fn title_rule_links(&self, date: &str, app_key: &str, title: &str) -> Vec<RowProject> {
+        let Some(group) = self.title_rules.get(app_key) else {
+            return Vec::new();
+        };
+        // Only allocated for apps that actually carry a title rule.
+        let haystack = title.to_lowercase();
+        group
+            .iter()
+            .filter(|(needle, rule)| haystack.contains(needle) && Self::gate_open(rule, date))
+            .map(|(_, rule)| Self::rule_link(rule))
             .collect()
     }
 
@@ -982,7 +1072,11 @@ impl Resolver {
         }
 
         let app_vetoes = self.excepted_from(date, app_key, "");
-        let mut links = self.rule_links(date, app_key);
+        // Rung three speaks *instead of* rung four, never alongside it.
+        let mut links = self.title_rule_links(date, app_key, title);
+        if links.is_empty() {
+            links = self.app_rule_links(date, app_key);
+        }
         links.retain(|link| {
             !title_vetoes.contains(&link.project_id) && !app_vetoes.contains(&link.project_id)
         });
@@ -998,9 +1092,10 @@ impl Resolver {
 
     /// What the day view draws against a row: the projects the row itself
     /// speaks for, plus the ones it has been excepted from. Inheritance is
-    /// rendered by *absence* on title rows, exactly as before rules existed —
-    /// an app-level row additionally shows the rules standing behind it, since
-    /// that is the row a rule attaches to.
+    /// rendered by *absence*, exactly as before rules existed — each row
+    /// additionally shows the rules whose subject *is* that row: app rules on
+    /// the app row, title rules on the title rows they match. Without the
+    /// latter a shadowed title would draw nothing while billing elsewhere.
     ///
     /// A project appears at most once. An exception must *replace* the link it
     /// cancels rather than sit beside it, or Excluded would render as Included
@@ -1009,8 +1104,12 @@ impl Resolver {
     fn row_projects(&self, date: &str, app_key: &str, title: &str) -> Vec<RowProject> {
         let vetoes = self.excepted_from(date, app_key, title);
         let mut out = direct_links(self.assigned_to(date, app_key, title));
-        if out.is_empty() && title.is_empty() {
-            out = self.rule_links(date, app_key);
+        if out.is_empty() {
+            out = if title.is_empty() {
+                self.app_rule_links(date, app_key)
+            } else {
+                self.title_rule_links(date, app_key, title)
+            };
         }
         out.retain(|link| !vetoes.contains(&link.project_id));
         for &project_id in vetoes {
@@ -1621,6 +1720,36 @@ pub fn tracked_apps(conn: &Connection) -> rusqlite::Result<Vec<TrackedApp>> {
         b.seconds
             .cmp(&a.seconds)
             .then_with(|| a.app_name.cmp(&b.app_name))
+    });
+    Ok(out)
+}
+
+/// Every window title one app has shown, busiest first — the candidates for a
+/// rule's title pattern. Untitled time is left out: a pattern is never empty,
+/// so it could not match it anyway. Ignored time is left out for the same
+/// reason as in `tracked_apps`.
+pub fn tracked_titles(conn: &Connection, app_key: &str) -> rusqlite::Result<Vec<TrackedTitle>> {
+    let ignores = Ignores::load(conn)?;
+    let mut by_title: HashMap<String, i64> = HashMap::new();
+    for seg in read_segments(conn, None)? {
+        let key = seg.key();
+        if key != app_key {
+            continue;
+        }
+        let title = seg.title();
+        if title.is_empty() || ignores.matches(&key, &title) {
+            continue;
+        }
+        *by_title.entry(title).or_insert(0) += seg.duration();
+    }
+    let mut out: Vec<TrackedTitle> = by_title
+        .into_iter()
+        .map(|(title, seconds)| TrackedTitle { title, seconds })
+        .collect();
+    out.sort_by(|a, b| {
+        b.seconds
+            .cmp(&a.seconds)
+            .then_with(|| a.title.cmp(&b.title))
     });
     Ok(out)
 }
@@ -2676,7 +2805,7 @@ mod tests {
         seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), Some("t"));
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
 
-        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, "", None).unwrap();
 
         let rows = project_breakdown(&conn, p.id).unwrap();
         assert_eq!(rows.len(), 1);
@@ -2684,12 +2813,233 @@ mod tests {
         assert_eq!(rows[0].seconds, 100);
     }
 
+    // ---- title rules (ADR 0003) -------------------------------------------
+
+    #[test]
+    fn title_rule_shadows_the_app_rule_for_the_titles_it_matches() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("ScriptR \u{2014} Dashboard"),
+        );
+        seg(
+            &conn,
+            s + 200,
+            s + 250,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("Hacker News"),
+        );
+        let reading = create_project(&conn, "Reading", "#fff").unwrap();
+        let echo = create_project(&conn, "Echo", "#000").unwrap();
+
+        create_rule(&conn, reading.id, "com.chrome", None, "", None).unwrap();
+        create_rule(&conn, echo.id, "com.chrome", None, "ScriptR", None).unwrap();
+
+        // The matched title bills Echo *instead of* Reading: rung three speaks,
+        // so rung four stays silent. Everything else still inherits the app rule.
+        let res = Resolver::load(&conn).unwrap();
+        assert_eq!(
+            ids(&res.resolve(d, "com.chrome", "ScriptR \u{2014} Dashboard")),
+            vec![echo.id]
+        );
+        assert_eq!(
+            ids(&res.resolve(d, "com.chrome", "Hacker News")),
+            vec![reading.id]
+        );
+
+        assert_eq!(project_breakdown(&conn, echo.id).unwrap()[0].seconds, 100);
+        assert_eq!(project_breakdown(&conn, reading.id).unwrap()[0].seconds, 50);
+    }
+
+    #[test]
+    fn title_rule_matches_case_insensitively_and_partially() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let p = create_project(&conn, "Echo", "#fff").unwrap();
+        create_rule(&conn, p.id, "com.chrome", None, "  ScriptR ", None).unwrap();
+        let res = Resolver::load(&conn).unwrap();
+
+        // Surrounding whitespace is trimmed at write time, the rest is a plain
+        // case-folded substring test.
+        assert_eq!(
+            ids(&res.resolve(d, "com.chrome", "scriptr.io | Docs")),
+            vec![p.id]
+        );
+        assert_eq!(ids(&res.resolve(d, "com.chrome", "SCRIPTR")), vec![p.id]);
+        assert!(res.resolve(d, "com.chrome", "Hacker News").is_empty());
+        // A pattern is never empty, so untitled activity never matches one.
+        assert!(res.resolve(d, "com.chrome", "").is_empty());
+    }
+
+    #[test]
+    fn dated_assignment_still_outranks_a_title_rule() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let echo = create_project(&conn, "Echo", "#fff").unwrap();
+        let admin = create_project(&conn, "Admin", "#000").unwrap();
+        create_rule(&conn, echo.id, "com.chrome", None, "ScriptR", None).unwrap();
+        add_assignment(
+            &conn,
+            d,
+            "com.chrome",
+            "ScriptR \u{2014} Dashboard",
+            admin.id,
+        )
+        .unwrap();
+
+        // Rungs one and two sit above both rule rungs (ADR 0001).
+        let res = Resolver::load(&conn).unwrap();
+        assert_eq!(
+            ids(&res.resolve(d, "com.chrome", "ScriptR \u{2014} Dashboard")),
+            vec![admin.id]
+        );
+        assert_eq!(
+            ids(&res.resolve(d, "com.chrome", "ScriptR Docs")),
+            vec![echo.id]
+        );
+    }
+
+    #[test]
+    fn excluding_a_day_takes_back_a_title_rule_link() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("ScriptR Docs"),
+        );
+        let p = create_project(&conn, "Echo", "#fff").unwrap();
+        create_rule(&conn, p.id, "com.chrome", None, "ScriptR", None).unwrap();
+
+        exclude_for_day(&conn, d, "com.chrome", "ScriptR Docs", p.id).unwrap();
+
+        // The exception is dated and keyed to the row, not to the rule: this day
+        // stops billing, the rule keeps standing for every other day.
+        let res = Resolver::load(&conn).unwrap();
+        assert!(res.resolve(d, "com.chrome", "ScriptR Docs").is_empty());
+        assert_eq!(
+            ids(&res.resolve("2026-04-02", "com.chrome", "ScriptR Docs")),
+            vec![p.id]
+        );
+    }
+
+    #[test]
+    fn day_view_draws_a_title_rule_on_the_title_row_it_matches() {
+        let conn = mem();
+        let d = "2026-04-01";
+        let s = day_start_ts(d);
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("ScriptR Docs"),
+        );
+        seg(
+            &conn,
+            s + 200,
+            s + 250,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("Hacker News"),
+        );
+        let p = create_project(&conn, "Echo", "#fff").unwrap();
+        create_rule(&conn, p.id, "com.chrome", None, "ScriptR", None).unwrap();
+
+        let view = day_view(&conn, d).unwrap();
+        let app = &view.apps[0];
+        // A title rule's subject is the title, so it draws there, not on the app
+        // row — otherwise a shadowed title would show nothing while billing.
+        assert!(app.projects.is_empty());
+        let matched = app
+            .titles
+            .iter()
+            .find(|t| t.title == "ScriptR Docs")
+            .unwrap();
+        assert_eq!(ids(&matched.projects), vec![p.id]);
+        assert_eq!(matched.projects[0].state, LinkState::Rule);
+        let other = app
+            .titles
+            .iter()
+            .find(|t| t.title == "Hacker News")
+            .unwrap();
+        assert!(other.projects.is_empty());
+    }
+
+    #[test]
+    fn tracked_titles_lists_busiest_first_and_skips_untitled_and_ignored() {
+        let conn = mem();
+        let s = day_start_ts("2026-04-01");
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("Docs"),
+        );
+        seg(
+            &conn,
+            s + 200,
+            s + 500,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("News"),
+        );
+        seg(
+            &conn,
+            s + 600,
+            s + 650,
+            Some("com.chrome"),
+            Some("Chrome"),
+            None,
+        );
+        seg(
+            &conn,
+            s + 700,
+            s + 999,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("Secret"),
+        );
+        seg(
+            &conn,
+            s + 1000,
+            s + 9999,
+            Some("dev.warp"),
+            Some("Warp"),
+            Some("shell"),
+        );
+        add_ignored_entry(&conn, "com.chrome", None, "Secret").unwrap();
+
+        let titles = tracked_titles(&conn, "com.chrome").unwrap();
+        let got: Vec<(&str, i64)> = titles
+            .iter()
+            .map(|t| (t.title.as_str(), t.seconds))
+            .collect();
+        assert_eq!(got, vec![("News", 300), ("Docs", 100)]);
+    }
+
     #[test]
     fn rules_can_be_listed_and_deleted() {
         let conn = mem();
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
-        let id = create_rule(&conn, p.id, "dev.warp", None, None).unwrap().id;
-        create_rule(&conn, p.id, "com.zen", None, Some("2026-04-01")).unwrap();
+        let id = create_rule(&conn, p.id, "dev.warp", None, "", None)
+            .unwrap()
+            .id;
+        create_rule(&conn, p.id, "com.zen", None, "", Some("2026-04-01")).unwrap();
 
         let rules = list_rules(&conn).unwrap();
         assert_eq!(rules.len(), 2);
@@ -2728,7 +3078,7 @@ mod tests {
         );
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
 
-        create_rule(&conn, p.id, "dev.warp", None, Some("2026-04-02")).unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, "", Some("2026-04-02")).unwrap();
 
         let rows = project_breakdown(&conn, p.id).unwrap();
         assert_eq!(rows.len(), 1);
@@ -2744,7 +3094,7 @@ mod tests {
         seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), None);
         let flow = create_project(&conn, "Flowstate", "#fff").unwrap();
         let side = create_project(&conn, "Side", "#000").unwrap();
-        create_rule(&conn, flow.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, flow.id, "dev.warp", None, "", None).unwrap();
 
         add_assignment(&conn, d, "dev.warp", "", side.id).unwrap();
 
@@ -2761,8 +3111,8 @@ mod tests {
         seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), None);
         let a = create_project(&conn, "A", "#fff").unwrap();
         let b = create_project(&conn, "B", "#000").unwrap();
-        create_rule(&conn, a.id, "dev.warp", None, None).unwrap();
-        create_rule(&conn, b.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, a.id, "dev.warp", None, "", None).unwrap();
+        create_rule(&conn, b.id, "dev.warp", None, "", None).unwrap();
 
         // Rules at one rung union, and each bills the full duration.
         assert_eq!(project_breakdown(&conn, a.id).unwrap()[0].seconds, 100);
@@ -2785,7 +3135,7 @@ mod tests {
             );
         }
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
-        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, "", None).unwrap();
 
         write_exception(&conn, dropped, "dev.warp", "", p.id).unwrap();
 
@@ -2860,7 +3210,7 @@ mod tests {
             None,
         );
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
-        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, "", None).unwrap();
 
         // Auto-delete must not eat time a standing rule classifies.
         let removed = clear_untagged(&conn).unwrap();
@@ -2873,7 +3223,7 @@ mod tests {
         let conn = mem();
         let d = "2026-04-01";
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
-        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, "", None).unwrap();
         write_exception(&conn, d, "dev.warp", "", p.id).unwrap();
 
         delete_project(&conn, p.id).unwrap();
@@ -2897,7 +3247,7 @@ mod tests {
             Some("y"),
         );
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
-        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, "", None).unwrap();
         write_exception(&conn, d, "com.zen", "", p.id).unwrap();
 
         let view = day_view(&conn, d).unwrap();
@@ -2936,7 +3286,7 @@ mod tests {
             Some("x"),
         );
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
-        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, "", None).unwrap();
         add_assignment(&conn, d, "com.zen", "y", p.id).unwrap();
 
         let entries = project_day_entries(&conn, p.id, d).unwrap();
@@ -2976,7 +3326,7 @@ mod tests {
         let s = day_start_ts(d);
         seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), None);
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
-        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, "", None).unwrap();
 
         exclude_for_day(&conn, d, "dev.warp", "", p.id).unwrap();
 
@@ -3064,7 +3414,7 @@ mod tests {
         let s = day_start_ts(d);
         seg(&conn, s, s + 100, Some("dev.warp"), Some("Warp"), Some("x"));
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
-        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, "", None).unwrap();
 
         exclude_for_day(&conn, d, "dev.warp", "", p.id).unwrap();
 
@@ -3124,7 +3474,7 @@ mod tests {
             );
         }
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
-        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, "", None).unwrap();
 
         let vetoed = remove_from_project(&conn, p.id, "dev.warp", None).unwrap();
 
@@ -3139,7 +3489,7 @@ mod tests {
         let conn = mem();
         let d = "2026-04-01";
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
-        create_rule(&conn, p.id, "dev.warp", None, None).unwrap();
+        create_rule(&conn, p.id, "dev.warp", None, "", None).unwrap();
         write_exception(&conn, d, "dev.warp", "", p.id).unwrap();
 
         reset_everything(&conn).unwrap();
