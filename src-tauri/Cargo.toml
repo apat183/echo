@@ -32,6 +32,22 @@ chrono = "0.4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSData", "NSDictionary", "NSString", "NSURL"] }
-objc2-app-kit = { version = "0.3", features = ["NSBitmapImageRep", "NSImage", "NSImageRep", "NSWorkspace", "NSRunningApplication"] }
+objc2-foundation = { version = "0.3", features = [
+  "NSData",
+  "NSDictionary",
+  "NSString",
+  "NSURL",
+] }
+# `NSGraphicsContext` + `objc2-core-graphics` are needed for the CGImage path in
+# `platform_app_icon_data_url`, which avoids rasterising every .icns
+# representation just to draw a 26pt badge.
+objc2-app-kit = { version = "0.3", features = [
+  "NSBitmapImageRep",
+  "NSGraphicsContext",
+  "NSImage",
+  "NSImageRep",
+  "NSWorkspace",
+  "NSRunningApplication",
+  "objc2-core-graphics",
+] }
 core-foundation = "0.10"

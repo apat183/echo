@@ -12,6 +12,9 @@ const { mockApi } = vi.hoisted(() => ({
     updateStatus: vi.fn(),
     installUpdate: vi.fn(),
     removeAssignment: vi.fn(),
+    excludeForDay: vi.fn(),
+    removeException: vi.fn(),
+    listRules: vi.fn(),
   },
 }));
 
@@ -54,6 +57,9 @@ beforeEach(() => {
   mockApi.updateStatus.mockResolvedValue({ state: "idle" });
   mockApi.installUpdate.mockResolvedValue(undefined);
   mockApi.removeAssignment.mockResolvedValue(undefined);
+  mockApi.excludeForDay.mockResolvedValue(undefined);
+  mockApi.removeException.mockResolvedValue(undefined);
+  mockApi.listRules.mockResolvedValue([]);
 });
 
 // A day with one app carrying an app-level link (→ Work) and a title-level
@@ -70,10 +76,14 @@ function linkedDay(date: string) {
         bundle_id: "com.warp",
         seconds: 300,
         hours: Array(24).fill(0),
-        project_ids: [1],
+        projects: [{ project_id: 1, state: "direct", rule_id: null }],
         titles: [
-          { title: "Flow plan", seconds: 200, project_ids: [2] },
-          { title: "Other doc", seconds: 100, project_ids: [] },
+          {
+            title: "Flow plan",
+            seconds: 200,
+            projects: [{ project_id: 2, state: "direct", rule_id: null }],
+          },
+          { title: "Other doc", seconds: 100, projects: [] },
         ],
       },
     ],
@@ -96,7 +106,7 @@ function renderLinkedPane() {
   );
 }
 
-describe("DayPane unassign confirmation", () => {
+describe("DayPane project dot removal", () => {
   beforeEach(() => {
     mockApi.getDayView.mockImplementation((date: string) => Promise.resolve(linkedDay(date)));
   });
@@ -106,11 +116,11 @@ describe("DayPane unassign confirmation", () => {
     vi.stubGlobal("confirm", confirmSpy);
     renderLinkedPane();
 
-    await userEvent.click(await screen.findByTitle("Work — click to unassign"));
+    await userEvent.click(await screen.findByTitle("Work — click to remove"));
 
     expect(confirmSpy).toHaveBeenCalledWith("Remove Warp from Work?");
     await waitFor(() =>
-      expect(mockApi.removeAssignment).toHaveBeenCalledWith(
+      expect(mockApi.excludeForDay).toHaveBeenCalledWith(
         expect.any(String),
         "com.warp",
         "",
@@ -124,10 +134,10 @@ describe("DayPane unassign confirmation", () => {
     vi.stubGlobal("confirm", confirmSpy);
     renderLinkedPane();
 
-    await userEvent.click(await screen.findByTitle("Work — click to unassign"));
+    await userEvent.click(await screen.findByTitle("Work — click to remove"));
 
     expect(confirmSpy).toHaveBeenCalledWith("Remove Warp from Work?");
-    expect(mockApi.removeAssignment).not.toHaveBeenCalled();
+    expect(mockApi.excludeForDay).not.toHaveBeenCalled();
   });
 
   it("confirms before unassigning a title-level project link", async () => {
@@ -136,16 +146,75 @@ describe("DayPane unassign confirmation", () => {
     renderLinkedPane();
 
     await userEvent.click(await screen.findByLabelText("Expand"));
-    await userEvent.click(await screen.findByTitle("Personal — click to unassign"));
+    await userEvent.click(await screen.findByTitle("Personal — click to remove"));
 
     expect(confirmSpy).toHaveBeenCalledWith("Remove Flow plan from Personal?");
     await waitFor(() =>
-      expect(mockApi.removeAssignment).toHaveBeenCalledWith(
+      expect(mockApi.excludeForDay).toHaveBeenCalledWith(
         expect.any(String),
         "com.warp",
         "Flow plan",
         2,
       )
+    );
+  });
+});
+
+describe("DayPane rule-derived and excluded dots", () => {
+  function dayWith(projects: unknown[], date: string) {
+    return {
+      date,
+      total_seconds: 300,
+      hours: Array(24).fill(0),
+      apps: [
+        {
+          app_key: "com.warp",
+          app_name: "Warp",
+          bundle_id: "com.warp",
+          seconds: 300,
+          hours: Array(24).fill(0),
+          projects,
+          titles: [{ title: "Only doc", seconds: 300, projects: [] }],
+        },
+      ],
+    };
+  }
+
+  it("names the responsible rule and excludes on click", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    mockApi.listRules.mockResolvedValue([
+      { id: 7, project_id: 1, app_key: "com.warp", app_name: "Warp", effective_from: null },
+    ]);
+    mockApi.getDayView.mockImplementation((date: string) =>
+      Promise.resolve(dayWith([{ project_id: 1, state: "rule", rule_id: 7 }], date))
+    );
+    renderLinkedPane();
+
+    await userEvent.click(
+      await screen.findByTitle("Work — via rule on Warp; click to exclude")
+    );
+
+    await waitFor(() =>
+      expect(mockApi.excludeForDay).toHaveBeenCalledWith(expect.any(String), "com.warp", "", 1)
+    );
+  });
+
+  it("clears an exception without confirming, letting rules apply again", async () => {
+    const confirmSpy = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirmSpy);
+    mockApi.getDayView.mockImplementation((date: string) =>
+      Promise.resolve(dayWith([{ project_id: 1, state: "excluded", rule_id: null }], date))
+    );
+    renderLinkedPane();
+
+    await userEvent.click(
+      await screen.findByTitle("Work — excluded for now; click to let rules apply again")
+    );
+
+    // Restoring destroys nothing, so it needs no confirmation.
+    expect(confirmSpy).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(mockApi.removeException).toHaveBeenCalledWith(expect.any(String), "com.warp", "", 1)
     );
   });
 });
