@@ -948,7 +948,9 @@ impl Resolver {
             group.dedup_by_key(|rule| rule.project_id);
         }
         for group in by_title.values_mut() {
-            group.sort_by(|a, b| (&a.0, a.1.project_id, a.1.id).cmp(&(&b.0, b.1.project_id, b.1.id)));
+            group.sort_by(|a, b| {
+                (&a.0, a.1.project_id, a.1.id).cmp(&(&b.0, b.1.project_id, b.1.id))
+            });
             // Same pattern, same project, twice over: bill it once.
             group.dedup_by(|a, b| a.0 == b.0 && a.1.project_id == b.1.project_id);
         }
@@ -1744,7 +1746,11 @@ pub fn tracked_titles(conn: &Connection, app_key: &str) -> rusqlite::Result<Vec<
         .into_iter()
         .map(|(title, seconds)| TrackedTitle { title, seconds })
         .collect();
-    out.sort_by(|a, b| b.seconds.cmp(&a.seconds).then_with(|| a.title.cmp(&b.title)));
+    out.sort_by(|a, b| {
+        b.seconds
+            .cmp(&a.seconds)
+            .then_with(|| a.title.cmp(&b.title))
+    });
     Ok(out)
 }
 
@@ -2814,8 +2820,22 @@ mod tests {
         let conn = mem();
         let d = "2026-04-01";
         let s = day_start_ts(d);
-        seg(&conn, s, s + 100, Some("com.chrome"), Some("Chrome"), Some("ScriptR \u{2014} Dashboard"));
-        seg(&conn, s + 200, s + 250, Some("com.chrome"), Some("Chrome"), Some("Hacker News"));
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("ScriptR \u{2014} Dashboard"),
+        );
+        seg(
+            &conn,
+            s + 200,
+            s + 250,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("Hacker News"),
+        );
         let reading = create_project(&conn, "Reading", "#fff").unwrap();
         let echo = create_project(&conn, "Echo", "#000").unwrap();
 
@@ -2829,7 +2849,10 @@ mod tests {
             ids(&res.resolve(d, "com.chrome", "ScriptR \u{2014} Dashboard")),
             vec![echo.id]
         );
-        assert_eq!(ids(&res.resolve(d, "com.chrome", "Hacker News")), vec![reading.id]);
+        assert_eq!(
+            ids(&res.resolve(d, "com.chrome", "Hacker News")),
+            vec![reading.id]
+        );
 
         assert_eq!(project_breakdown(&conn, echo.id).unwrap()[0].seconds, 100);
         assert_eq!(project_breakdown(&conn, reading.id).unwrap()[0].seconds, 50);
@@ -2845,7 +2868,10 @@ mod tests {
 
         // Surrounding whitespace is trimmed at write time, the rest is a plain
         // case-folded substring test.
-        assert_eq!(ids(&res.resolve(d, "com.chrome", "scriptr.io | Docs")), vec![p.id]);
+        assert_eq!(
+            ids(&res.resolve(d, "com.chrome", "scriptr.io | Docs")),
+            vec![p.id]
+        );
         assert_eq!(ids(&res.resolve(d, "com.chrome", "SCRIPTR")), vec![p.id]);
         assert!(res.resolve(d, "com.chrome", "Hacker News").is_empty());
         // A pattern is never empty, so untitled activity never matches one.
@@ -2859,7 +2885,14 @@ mod tests {
         let echo = create_project(&conn, "Echo", "#fff").unwrap();
         let admin = create_project(&conn, "Admin", "#000").unwrap();
         create_rule(&conn, echo.id, "com.chrome", None, "ScriptR", None).unwrap();
-        add_assignment(&conn, d, "com.chrome", "ScriptR \u{2014} Dashboard", admin.id).unwrap();
+        add_assignment(
+            &conn,
+            d,
+            "com.chrome",
+            "ScriptR \u{2014} Dashboard",
+            admin.id,
+        )
+        .unwrap();
 
         // Rungs one and two sit above both rule rungs (ADR 0001).
         let res = Resolver::load(&conn).unwrap();
@@ -2867,7 +2900,10 @@ mod tests {
             ids(&res.resolve(d, "com.chrome", "ScriptR \u{2014} Dashboard")),
             vec![admin.id]
         );
-        assert_eq!(ids(&res.resolve(d, "com.chrome", "ScriptR Docs")), vec![echo.id]);
+        assert_eq!(
+            ids(&res.resolve(d, "com.chrome", "ScriptR Docs")),
+            vec![echo.id]
+        );
     }
 
     #[test]
@@ -2875,7 +2911,14 @@ mod tests {
         let conn = mem();
         let d = "2026-04-01";
         let s = day_start_ts(d);
-        seg(&conn, s, s + 100, Some("com.chrome"), Some("Chrome"), Some("ScriptR Docs"));
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("ScriptR Docs"),
+        );
         let p = create_project(&conn, "Echo", "#fff").unwrap();
         create_rule(&conn, p.id, "com.chrome", None, "ScriptR", None).unwrap();
 
@@ -2885,7 +2928,10 @@ mod tests {
         // stops billing, the rule keeps standing for every other day.
         let res = Resolver::load(&conn).unwrap();
         assert!(res.resolve(d, "com.chrome", "ScriptR Docs").is_empty());
-        assert_eq!(ids(&res.resolve("2026-04-02", "com.chrome", "ScriptR Docs")), vec![p.id]);
+        assert_eq!(
+            ids(&res.resolve("2026-04-02", "com.chrome", "ScriptR Docs")),
+            vec![p.id]
+        );
     }
 
     #[test]
@@ -2893,8 +2939,22 @@ mod tests {
         let conn = mem();
         let d = "2026-04-01";
         let s = day_start_ts(d);
-        seg(&conn, s, s + 100, Some("com.chrome"), Some("Chrome"), Some("ScriptR Docs"));
-        seg(&conn, s + 200, s + 250, Some("com.chrome"), Some("Chrome"), Some("Hacker News"));
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("ScriptR Docs"),
+        );
+        seg(
+            &conn,
+            s + 200,
+            s + 250,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("Hacker News"),
+        );
         let p = create_project(&conn, "Echo", "#fff").unwrap();
         create_rule(&conn, p.id, "com.chrome", None, "ScriptR", None).unwrap();
 
@@ -2903,10 +2963,18 @@ mod tests {
         // A title rule's subject is the title, so it draws there, not on the app
         // row — otherwise a shadowed title would show nothing while billing.
         assert!(app.projects.is_empty());
-        let matched = app.titles.iter().find(|t| t.title == "ScriptR Docs").unwrap();
+        let matched = app
+            .titles
+            .iter()
+            .find(|t| t.title == "ScriptR Docs")
+            .unwrap();
         assert_eq!(ids(&matched.projects), vec![p.id]);
         assert_eq!(matched.projects[0].state, LinkState::Rule);
-        let other = app.titles.iter().find(|t| t.title == "Hacker News").unwrap();
+        let other = app
+            .titles
+            .iter()
+            .find(|t| t.title == "Hacker News")
+            .unwrap();
         assert!(other.projects.is_empty());
     }
 
@@ -2914,11 +2982,46 @@ mod tests {
     fn tracked_titles_lists_busiest_first_and_skips_untitled_and_ignored() {
         let conn = mem();
         let s = day_start_ts("2026-04-01");
-        seg(&conn, s, s + 100, Some("com.chrome"), Some("Chrome"), Some("Docs"));
-        seg(&conn, s + 200, s + 500, Some("com.chrome"), Some("Chrome"), Some("News"));
-        seg(&conn, s + 600, s + 650, Some("com.chrome"), Some("Chrome"), None);
-        seg(&conn, s + 700, s + 999, Some("com.chrome"), Some("Chrome"), Some("Secret"));
-        seg(&conn, s + 1000, s + 9999, Some("dev.warp"), Some("Warp"), Some("shell"));
+        seg(
+            &conn,
+            s,
+            s + 100,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("Docs"),
+        );
+        seg(
+            &conn,
+            s + 200,
+            s + 500,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("News"),
+        );
+        seg(
+            &conn,
+            s + 600,
+            s + 650,
+            Some("com.chrome"),
+            Some("Chrome"),
+            None,
+        );
+        seg(
+            &conn,
+            s + 700,
+            s + 999,
+            Some("com.chrome"),
+            Some("Chrome"),
+            Some("Secret"),
+        );
+        seg(
+            &conn,
+            s + 1000,
+            s + 9999,
+            Some("dev.warp"),
+            Some("Warp"),
+            Some("shell"),
+        );
         add_ignored_entry(&conn, "com.chrome", None, "Secret").unwrap();
 
         let titles = tracked_titles(&conn, "com.chrome").unwrap();
@@ -2933,7 +3036,9 @@ mod tests {
     fn rules_can_be_listed_and_deleted() {
         let conn = mem();
         let p = create_project(&conn, "Flowstate", "#fff").unwrap();
-        let id = create_rule(&conn, p.id, "dev.warp", None, "", None).unwrap().id;
+        let id = create_rule(&conn, p.id, "dev.warp", None, "", None)
+            .unwrap()
+            .id;
         create_rule(&conn, p.id, "com.zen", None, "", Some("2026-04-01")).unwrap();
 
         let rules = list_rules(&conn).unwrap();

@@ -108,7 +108,10 @@ fn tracked_apps(state: State<'_, DbState>) -> Result<Vec<db::TrackedApp>, String
 }
 
 #[tauri::command(async)]
-fn tracked_titles(state: State<'_, DbState>, app_key: String) -> Result<Vec<db::TrackedTitle>, String> {
+fn tracked_titles(
+    state: State<'_, DbState>,
+    app_key: String,
+) -> Result<Vec<db::TrackedTitle>, String> {
     let conn = state.lock().map_err(|e| e.to_string())?;
     db::tracked_titles(&conn, &app_key).map_err(|e| e.to_string())
 }
