@@ -77,7 +77,15 @@ export function DayPane(props: {
   );
 
   const ruleNames = useMemo(
-    () => new Map(rules.map((r) => [r.id, r.app_name ?? r.app_key])),
+    () =>
+      new Map(
+        rules.map((r) => {
+          const app = r.app_name ?? r.app_key;
+          // A title rule is named by what it matches: "Chrome" alone would be
+          // a lie on a row the app rule no longer covers.
+          return [r.id, r.title ? `${app} · “${r.title}”` : app];
+        })
+      ),
     [rules]
   );
 
@@ -224,9 +232,9 @@ function UpdateBanner(props: { update: UpdateStatus }) {
       );
     case "downloading": {
       const progress =
-        update.total !== null
-          ? `${Math.min(100, Math.round((update.downloaded / update.total) * 100))}%`
-          : `${(update.downloaded / (1024 * 1024)).toFixed(1)} MB`;
+        update.total === null
+          ? `${(update.downloaded / (1024 * 1024)).toFixed(1)} MB`
+          : `${Math.min(100, Math.round((update.downloaded / update.total) * 100))}%`;
       return (
         <div className="ax-banner update-banner">
           <div className="banner-text">

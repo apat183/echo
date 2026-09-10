@@ -4,7 +4,8 @@ Date: 2026-07-25
 
 ## Status
 
-Accepted.
+Accepted. The title subject slot reserved below is filled by
+[ADR 0003](./0003-title-rules-match-by-substring.md).
 
 ## Context
 
@@ -50,7 +51,8 @@ One rule targets one project; overlap is expressed as two rules.
 **Rules are retroactive by default**, with a per-rule forward-only choice taken
 when the rule is saved. Deleting a rule un-bills its history symmetrically.
 
-Version one ships the app subject slot only.
+Version one ships the app subject slot only. (Superseded by ADR 0003, which
+fills the title slot with a case-insensitive substring pattern.)
 
 ## Consequences
 

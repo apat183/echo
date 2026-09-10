@@ -48,6 +48,16 @@ over another — a Rule about a particular title speaks more directly than a Rul
 about the whole app, and so overrides it, exactly as a title-level Assignment
 overrides an App-Level one.
 
+**Title Pattern** — the fragment of a Window Title a Rule is about. It matches
+loosely and without regard to case, because titles are transient: the point of
+a pattern is to name the part that stays the same from day to day, not the
+whole of what was once on screen. A Rule with no Title Pattern is about the
+app itself.
+
+**Reach** — how much already-tracked activity a Title Pattern would claim: the
+titles it matches and the time they hold. A pattern's reach cannot be guessed
+from reading it, so it is shown before the Rule is made.
+
 **Gate Constraint** — the part of a Rule that says *when* it is live: a
 weekday, a time of day, a date from which it takes effect. A gate can stop a
 Rule from applying, but it never wins an argument between Rules. "Zen" and "a

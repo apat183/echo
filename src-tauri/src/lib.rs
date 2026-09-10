@@ -108,6 +108,12 @@ fn tracked_apps(state: State<'_, DbState>) -> Result<Vec<db::TrackedApp>, String
 }
 
 #[tauri::command(async)]
+fn tracked_titles(state: State<'_, DbState>, app_key: String) -> Result<Vec<db::TrackedTitle>, String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::tracked_titles(&conn, &app_key).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
 fn list_rules(state: State<'_, DbState>) -> Result<Vec<db::AssignmentRule>, String> {
     let conn = state.lock().map_err(|e| e.to_string())?;
     db::list_rules(&conn).map_err(|e| e.to_string())
@@ -119,6 +125,7 @@ fn create_rule(
     project_id: i64,
     app_key: String,
     app_name: Option<String>,
+    title: String,
     effective_from: Option<String>,
 ) -> Result<db::AssignmentRule, String> {
     let conn = state.lock().map_err(|e| e.to_string())?;
@@ -127,6 +134,7 @@ fn create_rule(
         project_id,
         &app_key,
         app_name.as_deref(),
+        &title,
         effective_from.as_deref(),
     )
     .map_err(|e| e.to_string())
@@ -514,6 +522,7 @@ pub fn run() {
             remove_assignment,
             remove_from_project,
             tracked_apps,
+            tracked_titles,
             list_rules,
             create_rule,
             delete_rule,
