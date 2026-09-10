@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Calendar, CalendarDays, CalendarRange, ChevronLeft, ChevronRight } from "lucide-react";
-import { api, appColor, fmtDur, initials, type Project, toDateStr, type UpdateStatus } from "../api";
+import { api, appColor, type AssignmentRule, fmtDur, initials, type Project, toDateStr, type UpdateStatus } from "../api";
 import { type DragPayload, startDrag } from "../drag";
 import { mergeDayViews, partitionTitles, type PeriodAppUsage, type PeriodTitleUsage, type PeriodView, type RowProject } from "../merge";
 import { type Granularity, periodDates, periodLabel, samePeriod, shiftPeriod } from "../period";
@@ -24,6 +24,7 @@ export function DayPane(props: {
   const [view, setView] = useState<PeriodView | null>(null);
   const [axOk, setAxOk] = useState(true); // assume ok until checked, to avoid a flash
   const [update, setUpdate] = useState<UpdateStatus>({ state: "idle" });
+  const [rules, setRules] = useState<AssignmentRule[]>([]);
 
   // Poll Accessibility status so the banner disappears once granted.
   useEffect(() => {
@@ -65,9 +66,19 @@ export function DayPane(props: {
     if (assignmentVersion > 0) load();
   }, [assignmentVersion, load]);
 
+  // Rule-derived dots name the responsible rule in their tooltip.
+  useEffect(() => {
+    api.listRules().then(setRules).catch(() => {});
+  }, [assignmentVersion]);
+
   const projectById = useMemo(
     () => new Map(projects.map((p) => [p.id, p])),
     [projects]
+  );
+
+  const ruleNames = useMemo(
+    () => new Map(rules.map((r) => [r.id, r.app_name ?? r.app_key])),
+    [rules]
   );
 
   const isCurrentPeriod = samePeriod(date, toDateStr(new Date()), gran);
@@ -151,14 +162,27 @@ export function DayPane(props: {
               key={a.app_key}
               app={a}
               projectById={projectById}
-              onUnassign={async (title, projectId, dates) => {
-                // Removal is immediate and permanent (no undo), and the dot is an
-                // easy misclick next to the app name — so confirm first.
-                const projName = projectById.get(projectId)?.name ?? "this project";
-                if (!window.confirm(`Remove ${title || a.app_name} from ${projName}?`)) return;
-                await Promise.all(
-                  dates.map((d) => api.removeAssignment(d, a.app_key, title, projectId))
-                );
+              ruleNames={ruleNames}
+              onToggleProject={async (title, project) => {
+                if (project.state === "excluded") {
+                  // Clearing a recorded "no" returns the row to Undecided, so
+                  // any rule behind it takes over again. Nothing is destroyed.
+                  await Promise.all(
+                    project.excludedDates.map((d) =>
+                      api.removeException(d, a.app_key, title, project.id)
+                    )
+                  );
+                } else {
+                  // Removal is immediate and permanent (no undo), and the dot is an
+                  // easy misclick next to the app name — so confirm first.
+                  const projName = projectById.get(project.id)?.name ?? "this project";
+                  if (!window.confirm(`Remove ${title || a.app_name} from ${projName}?`)) return;
+                  await Promise.all(
+                    project.includedDates.map((d) =>
+                      api.excludeForDay(d, a.app_key, title, project.id)
+                    )
+                  );
+                }
                 await load();
                 onAssignmentChange();
               }}
@@ -241,11 +265,17 @@ function UpdateBanner(props: { update: UpdateStatus }) {
   }
 }
 
-/** Colored dots for the projects a row is explicitly linked to (click to unassign). */
+/**
+ * A dot per project standing against this row. Filled means you put it there;
+ * ringed means a rule did; struck through means you deliberately took it out
+ * and it would otherwise be back. Clicking always changes what you can see:
+ * an included dot comes out, an excluded one goes back to undecided.
+ */
 function ProjectDots(props: {
   projects: RowProject[];
   projectById: Map<number, Project>;
-  onUnassign: (projectId: number, dates: string[]) => void;
+  ruleNames: Map<number, string>;
+  onToggle: (project: RowProject) => void;
 }) {
   if (props.projects.length === 0) return null;
   return (
@@ -253,15 +283,41 @@ function ProjectDots(props: {
       {props.projects.map((p) => {
         const proj = props.projectById.get(p.id);
         if (!proj) return null;
+        const excluded = p.state === "excluded";
+        const viaRule = p.state === "rule";
+        const rule = p.ruleId == null ? null : props.ruleNames.get(p.ruleId);
         return (
           <span
             key={p.id}
-            className="proj-dot"
-            style={{ background: proj.color }}
-            title={`${proj.name} — click to unassign`}
+            role="button"
+            tabIndex={0}
+            aria-label={
+              excluded
+                ? `${proj.name} — excluded, click to restore`
+                : `${proj.name} — click to remove`
+            }
+            className={`proj-dot ${excluded ? "excluded" : ""} ${viaRule ? "via-rule" : ""}`}
+            style={
+              excluded || viaRule
+                ? { borderColor: proj.color, color: proj.color }
+                : { background: proj.color }
+            }
+            title={
+              excluded
+                ? `${proj.name} — excluded for now; click to let rules apply again`
+                : viaRule
+                  ? `${proj.name} — via rule${rule ? ` on ${rule}` : ""}; click to exclude`
+                  : `${proj.name} — click to remove`
+            }
             onClick={(e) => {
               e.stopPropagation();
-              props.onUnassign(p.id, p.dates);
+              props.onToggle(p);
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter" && e.key !== " ") return;
+              e.preventDefault();
+              e.stopPropagation();
+              props.onToggle(p);
             }}
           />
         );
@@ -273,7 +329,8 @@ function ProjectDots(props: {
 function AppRow(props: {
   app: PeriodAppUsage;
   projectById: Map<number, Project>;
-  onUnassign: (title: string, projectId: number, dates: string[]) => void;
+  ruleNames: Map<number, string>;
+  onToggleProject: (title: string, project: RowProject) => void;
   onDragStart: (payload: DragPayload) => void;
   onDragEnd: () => void;
 }) {
@@ -345,7 +402,8 @@ function AppRow(props: {
           <ProjectDots
             projects={app.projects}
             projectById={projectById}
-            onUnassign={(projectId, dates) => props.onUnassign("", projectId, dates)}
+            ruleNames={props.ruleNames}
+            onToggle={(project) => props.onToggleProject("", project)}
           />
           {canExpand && (
             <span className="title-count" title={`${app.titles.length} window titles`}>
@@ -361,7 +419,8 @@ function AppRow(props: {
         <TitleList
           app={app}
           projectById={projectById}
-          onUnassign={props.onUnassign}
+          ruleNames={props.ruleNames}
+          onToggleProject={props.onToggleProject}
           onDragStart={props.onDragStart}
           onDragEnd={props.onDragEnd}
         />
@@ -373,7 +432,8 @@ function AppRow(props: {
 function TitleList(props: {
   app: PeriodAppUsage;
   projectById: Map<number, Project>;
-  onUnassign: (title: string, projectId: number, dates: string[]) => void;
+  ruleNames: Map<number, string>;
+  onToggleProject: (title: string, project: RowProject) => void;
   onDragStart: (payload: DragPayload) => void;
   onDragEnd: () => void;
 }) {
@@ -414,7 +474,8 @@ function TitleList(props: {
           <ProjectDots
             projects={t.projects}
             projectById={projectById}
-            onUnassign={(projectId, dates) => props.onUnassign(t.title, projectId, dates)}
+            ruleNames={props.ruleNames}
+            onToggle={(project) => props.onToggleProject(t.title, project)}
           />
         )}
         <span className="title-time">{fmtDur(t.seconds)}</span>

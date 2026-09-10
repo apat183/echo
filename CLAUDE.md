@@ -48,7 +48,10 @@ Two invariants the tests guard — preserve them when touching the poller/tracke
 - A segment is attributed to the **local date of its `start_ts`** (`local_date_string` / `day_start_ts` in `db.rs`). All views use this convention consistently.
 - Each row is read through the private **`Segment`** type in `db.rs`, which owns the domain derivations in one place: `key()` (the stable assignment key = bundle id, else name, else `"unknown"`), `display_name()`, `title()`, `duration()`, `local_date()`. Aggregations iterate `read_segments(...)` rather than re-deriving these inline.
 - Projects are buckets. Time is linked to projects via **`day_assignments`**, keyed `(date, app_key, title, project_id)` — this is **many-to-many**: one app/title row on a given day can carry multiple project tags, and each tag bills the full duration (overlapping totals by design). Dragging an app/title onto a project in the UI assigns only the selected day(s), not all history. Use `add_assignment` / `remove_assignment`; there is no single-project `set_assignment`.
-- `title = ""` is the **app-level** assignment: a fallback covering every title not assigned on its own. The resolution rule lives in one place — the private **`Assignments`** module in `db.rs`: `links(date, key, title)` returns the set of project ids for the exact link (what the day view shows per row, so inheritance renders) and `resolve(date, key, title)` adds the app-level fallback (what `project_breakdown` / `project_apps` bill each segment to). Don't re-open-code this fallback at call sites.
+- `title = ""` is the **app-level** assignment: a fallback covering every title not assigned on its own.
+- **Standing rules** live in `assignment_rules` (date-less: app_key → project, with an optional `effective_from` gate). **Exceptions** live in `assignment_exceptions`, keyed like an assignment, and mean *"this is NOT that project, that day"*. See `docs/adr/0001` and `0002` for why, and `CONTEXT.md` for the vocabulary.
+- The whole resolution rule lives in one place — the private **`Resolver`** in `db.rs`. It walks four rungs, stopping at the first that speaks: `day-title > day-app > rule-title > rule-app` (a dated act always outranks a standing rule; v1 has no title-subject rules, so rung three is empty). `assigned_to(date, key, title)` is the row's own tags; `resolve(...)` is what a segment bills to, as `RowProject { project_id, state, rule_id }`; `row_projects(...)` is what the day view draws, including `Excluded` entries so a deliberate "no" is distinguishable from an unreviewed gap. **Don't re-open-code any of this at call sites** — `untagged_segment_ids` depends on it too, so a resolution bug silently changes what auto-delete eats.
+- An assignment and an exception on the same key are **mutually exclusive**: writing either clears the other. `exclude_for_day` is the click-a-dot gesture — delete the assignment, then record an exception only if the row would still be inherited.
 - Projects have a user-controlled `sort_order`; the `set_project_order` command reorders them. The frontend sends the full ordered id list; the backend updates each row's `sort_order` in a transaction.
 - `project_period_notes` attaches notes to project day/week/month buckets. Week views group day notes underneath the week note; month views group week notes underneath the month note. The old per-entry notes concept is retired.
 - Ignored activity is held in `ignored_entries` and excluded from Activities until the user removes the ignored rule.
@@ -80,9 +83,38 @@ The update flow is Rust-owned in `updater.rs`, mirroring existing patterns: the 
 ### Adding a Tauri command
 
 1. Write the `db.rs` function (pure, takes `&Connection`).
-2. Add a `#[tauri::command]` wrapper in `lib.rs` that locks `DbState` and maps errors to `String`.
+2. Add a **`#[tauri::command(async)]`** wrapper in `lib.rs` that locks `DbState` and maps errors to `String`.
 3. Register it in the `generate_handler!` list in `lib.rs`.
 4. Add the typed wrapper + any shared types in `src/api.ts`.
+
+**Always `(async)`, never a bare `#[tauri::command]`.** A plain sync command runs
+its body on the **main thread**, so anything that locks the DB, scans segments or
+touches AppKit freezes the UI for its whole duration. The annotation costs a task
+dispatch; omitting it on a command that later grows a table scan costs a visible
+hang. `install_update` is exempt only because it is already an `async fn`.
+
+### Performance instrumentation
+
+`perf.rs` holds opt-in startup timing, off unless `ECHO_PERF=1`. Run the bundled
+app with it to get an elapsed-since-process-start trace of DB open, autodelete,
+time-to-first-IPC, and per-icon / per-`day_view` cost:
+
+```sh
+bun run tauri build --bundles app
+ECHO_PERF=1 ./src-tauri/target/release/bundle/macos/Echo.app/Contents/MacOS/echo
+```
+
+Measure the **bundled** app, not `cargo run`: a bare binary has no `Info.plist`,
+so WKWebView never starts and no IPC is ever issued. A debug build also skews the
+picture — release is 10-100x faster on the resolve loops and `updater.rs` skips
+its periodic check outside release.
+
+App icons are the cautionary tale. `NSWorkspace::iconForFile` returns a *lazy*
+NSImage holding every `.icns` representation up to 1024²; calling
+`TIFFRepresentation()` on it rasterises all of them (~350 ms) before the PNG
+encode (~150 ms). At ~50 tracked apps on the main thread that was an ~8 s cold-start
+freeze. `platform_app_icon_data_url` now asks for a `CGImage` at the size actually
+drawn (`ICON_PX`), which is ~5 ms and ~20 KB per icon.
 
 ## Notes
 

@@ -6,6 +6,7 @@ import { Sidebar, type Selection } from "./components/Sidebar";
 import { DayPane } from "./components/DayPane";
 import { ProjectPane } from "./components/ProjectPane";
 import { IgnoredPane } from "./components/IgnoredPane";
+import { RulesPane } from "./components/RulesPane";
 import { SettingsPane } from "./components/SettingsPane";
 import "./App.css";
 
@@ -98,6 +99,12 @@ export default function App() {
           />
         ) : selection.kind === "ignored" ? (
           <IgnoredPane refreshKey={ignoredVersion} onChanged={handleIgnoredChanged} />
+        ) : selection.kind === "rules" ? (
+          <RulesPane
+            projects={projects}
+            refreshKey={assignmentVersion}
+            onChanged={handleAssignmentChanged}
+          />
         ) : selection.kind === "settings" ? (
           <SettingsPane onDataChanged={handleDataChanged} />
         ) : (
