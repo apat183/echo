@@ -11,6 +11,7 @@ import { type Granularity, periodDates, periodLabel, samePeriod, shiftPeriod } f
 import { loadAppIcon } from "../appIcon";
 import { Segmented } from "./Segmented";
 import { MiniUsageChart, UsageChart } from "./charts";
+import { ManualEntries } from "./ManualEntries";
 
 export function DayPane(props: {
   projects: Project[];
@@ -160,6 +161,12 @@ export function DayPane(props: {
         <p className="usage-sub">{view?.label ?? label} · tracked time</p>
 
         {view && <UsageChart buckets={view.timeline} granularity={gran} />}
+
+        {gran === "day" && <ManualEntries key={date} date={date} onChanged={(entryDate) => {
+          if (entryDate === date) void load();
+          else setDate(entryDate);
+          onAssignmentChange();
+        }} />}
 
         <div className="app-list">
           {view?.apps.length === 0 && (

@@ -72,4 +72,5 @@ TODO.md
 *.sw?
 docs/*
 !docs/adr/
+!docs/SPEC-manual-entries.md
 .claude/

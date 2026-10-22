@@ -15,6 +15,10 @@ const { mockApi } = vi.hoisted(() => ({
     excludeForDay: vi.fn(),
     removeException: vi.fn(),
     listRules: vi.fn(),
+    trackedApps: vi.fn(),
+    listManualEntries: vi.fn(),
+    addManualEntry: vi.fn(),
+    deleteManualEntry: vi.fn(),
   },
 }));
 
@@ -60,6 +64,15 @@ beforeEach(() => {
   mockApi.excludeForDay.mockResolvedValue(undefined);
   mockApi.removeException.mockResolvedValue(undefined);
   mockApi.listRules.mockResolvedValue([]);
+  mockApi.trackedApps.mockResolvedValue([]);
+  mockApi.listManualEntries.mockResolvedValue([]);
+});
+
+it("offers manual entry on an empty day and keeps it out of week view", async () => {
+  renderPane();
+  expect(await screen.findByRole("button", { name: "Add manual entry" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Week" }));
+  expect(screen.queryByRole("button", { name: "Add manual entry" })).not.toBeInTheDocument();
 });
 
 // A day with one app carrying an app-level link (→ Work) and a title-level
