@@ -22,6 +22,8 @@ Echo is free and personal. If it saves you time, you can say thanks:
 - Menu-bar tracking with pause, resume, open, and quit controls.
 - Local app and window-title capture on macOS.
 - Day, week, and month activity charts with per-app breakdowns.
+- Manual entries for missed time, with past-only start/stop times, overlap warnings,
+  and individual deletion.
 - Per-project totals and app/title breakdowns.
 - Drag app or title rows onto projects to assign time.
 - Standing rules that send an app's time to a project on every day, so the same
@@ -37,6 +39,18 @@ Echo is free and personal. If it saves you time, you can say thanks:
 - In-app auto-update: signed, notarized releases update themselves in place.
 
 ![Echo project view](assets/readme/Project.png)
+
+## Manual entries
+
+Open Activities in Day view and choose **Add manual entry**. Pick a previously
+tracked app, a date, and start/stop times on that day. Earlier today is allowed;
+the stop time must already have passed. Add separate entries for separate days.
+
+Echo warns if the interval overlaps any recorded activity, including the session
+currently being tracked. **Save anyway** keeps both durations, so totals can
+exceed elapsed time. Entries follow existing app assignments, rules, ignores,
+and untagged cleanup settings. To correct a mistake, delete its manual entry and
+add it again. Monitored sessions cannot be deleted through this control.
 
 ## Privacy
 

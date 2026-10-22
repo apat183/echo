@@ -5,10 +5,18 @@ the words mean, never how they are implemented.
 
 ## Tracking
 
-**Segment** — one continuous stretch during which a single app, showing a single
-window title, was frontmost. Segments are ground truth and are never revised
-once recorded. A segment is billed entirely to the local calendar date on which
-it started, even if it ran past midnight.
+**Segment** — one recorded interval for an app, optionally with a window title.
+A monitored segment is one continuous stretch during which that app and title
+were frontmost; it is ground truth and is never revised once recorded. A segment
+is billed entirely to the local calendar date on which it started, even if it ran
+past midnight.
+
+**Manual Entry** — an app-level segment the user adds for missed time, with a
+start and stop on the same local day entirely in the past. Manual entries retain
+their origin and can be deleted individually; monitored segments cannot. An
+overlap needs explicit confirmation and counts both intervals in full. Manual
+entries follow the same assignments, rules, ignores, and cleanup as monitored
+activity.
 
 **App Key** — the stable identity of an app for the purposes of grouping and
 matching. Two runs of the same app on different days share an app key; a rename
