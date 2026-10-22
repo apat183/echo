@@ -53,8 +53,11 @@ jobs:
           path: coverage
           if-no-files-found: ignore
 
-      - name: Build frontend
-        run: bun run build
+      - name: Build app
+        # A debug `tauri build` (its beforeBuildCommand is `bun run build`) runs
+        # Tauri's npm-vs-crate version check, so a Dependabot bump that moves
+        # only the Rust crates fails here instead of in the release workflow.
+        run: bun run tauri build --debug --no-bundle
 
       - name: Check Rust formatting
         working-directory: src-tauri
