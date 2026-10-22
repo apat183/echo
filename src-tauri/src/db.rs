@@ -1,7 +1,7 @@
 //! SQLite storage. We own this database entirely.
 //!
 //! Tables:
-//!   segments        immutable, append-only ground truth (one row per app focus stretch)
+//!   segments        immutable monitored sessions and individually removable manual entries
 //!   projects        user-created buckets
 //!   day_assignments per-(local-day, app) tags linking time to projects, many-to-many
 //!                   (drag = "just that day", #7); one app/title can be tagged with
@@ -15,15 +15,48 @@
 //! All time aggregation attributes a segment to the LOCAL date of its start, so the
 //! daily view and project breakdown stay consistent.
 
-use chrono::{Datelike, Local, NaiveDate, TimeZone};
+use chrono::{Datelike, Local, NaiveDate, NaiveTime, TimeZone, Timelike};
 use rusqlite::{Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Shared handle to our SQLite connection (poller thread + commands + tray).
 pub type DbState = Arc<Mutex<Connection>>;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualEntryInput {
+    pub app_key: String,
+    pub date: String,
+    pub start_time: String,
+    pub end_time: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ManualEntry {
+    pub id: i64,
+    pub app_key: String,
+    pub app_name: String,
+    pub bundle_id: Option<String>,
+    pub start_ts: i64,
+    pub end_ts: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ManualConflict {
+    pub app_name: String,
+    pub start_ts: i64,
+    pub end_ts: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AddManualEntryResult {
+    Saved { entry: ManualEntry },
+    Overlap { conflicts: Vec<ManualConflict> },
+}
 
 #[derive(Debug, Serialize)]
 pub struct Project {
@@ -226,7 +259,19 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     migrate_ignored_entries_app_name(&conn)?;
     migrate_add_rule_tables(&conn)?;
     migrate_assignment_rules_title(&conn)?;
+    migrate_segments_manual(&conn)?;
     Ok(conn)
+}
+
+fn migrate_segments_manual(conn: &Connection) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(segments)")?;
+    let columns = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for column in columns {
+        if column? == "is_manual" {
+            return Ok(());
+        }
+    }
+    conn.execute_batch("ALTER TABLE segments ADD COLUMN is_manual INTEGER NOT NULL DEFAULT 0;")
 }
 
 /// DBs predating assignment rules have neither table. Both are additive — no
@@ -406,6 +451,154 @@ pub fn insert_segment(
          VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![start_ts, end_ts, app_bundle_id, app_name, window_title],
     )?;
+    Ok(())
+}
+
+// ---- manual entries ------------------------------------------------------
+
+fn manual_date(date: &str) -> Result<NaiveDate, String> {
+    let parsed = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map_err(|_| "Choose a valid date.".to_string())?;
+    if date.len() != 10 || parsed.format("%Y-%m-%d").to_string() != date {
+        return Err("Choose a valid date.".into());
+    }
+    Ok(parsed)
+}
+
+fn local_day_bounds(date: &str) -> Result<(i64, i64), String> {
+    let day = manual_date(date)?;
+    let next = day.succ_opt().ok_or("Choose a valid date.")?;
+    let midnight = |day: NaiveDate| {
+        Local
+            .from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .map(|dt| dt.timestamp())
+            .ok_or_else(|| "This date has no local midnight.".to_string())
+    };
+    Ok((midnight(day)?, midnight(next)?))
+}
+
+pub fn add_manual_entry(
+    conn: &Connection,
+    input: &ManualEntryInput,
+    allow_overlap: bool,
+    now: i64,
+    open: Option<ManualConflict>,
+) -> Result<AddManualEntryResult, String> {
+    let day = manual_date(&input.date)?;
+    let timestamp = |value: &str, label: &str| -> Result<i64, String> {
+        let time = NaiveTime::parse_from_str(value, "%H:%M")
+            .map_err(|_| format!("Choose a valid {label} time."))?;
+        if value.len() != 5 || time.format("%H:%M").to_string() != value {
+            return Err(format!("Choose a valid {label} time."));
+        }
+        Local.from_local_datetime(&day.and_time(time)).single()
+            .map(|dt| dt.timestamp())
+            .ok_or_else(|| format!("The {label} time does not exist or occurs twice because of daylight saving. Choose another time."))
+    };
+    let start_ts = timestamp(&input.start_time, "start")?;
+    let end_ts = timestamp(&input.end_time, "stop")?;
+    if end_ts <= start_ts {
+        return Err("Stop time must be after start time on the same day.".into());
+    }
+    if end_ts > now {
+        return Err("Stop time must already be in the past.".into());
+    }
+    let app = tracked_apps(conn)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|app| app.app_key == input.app_key)
+        .ok_or("Choose a previously tracked app that is not ignored.")?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT start_ts, end_ts, COALESCE(app_name, app_bundle_id, 'unknown')
+         FROM segments WHERE start_ts < ?2 AND end_ts > ?1 AND end_ts > start_ts
+         ORDER BY start_ts, id",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut conflicts = stmt
+        .query_map(rusqlite::params![start_ts, end_ts], |r| {
+            Ok(ManualConflict {
+                start_ts: r.get(0)?,
+                end_ts: r.get(1)?,
+                app_name: r.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    if let Some(open) = open {
+        if open.start_ts < end_ts && open.end_ts > start_ts && open.end_ts > open.start_ts {
+            conflicts.push(open);
+        }
+    }
+    if !allow_overlap && !conflicts.is_empty() {
+        return Ok(AddManualEntryResult::Overlap { conflicts });
+    }
+    conn.execute(
+        "INSERT INTO segments (start_ts, end_ts, app_bundle_id, app_name, window_title, is_manual)
+         VALUES (?1, ?2, ?3, ?4, NULL, 1)",
+        rusqlite::params![start_ts, end_ts, app.bundle_id, app.app_name],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(AddManualEntryResult::Saved {
+        entry: ManualEntry {
+            id: conn.last_insert_rowid(),
+            app_key: app.app_key,
+            app_name: app.app_name,
+            bundle_id: app.bundle_id,
+            start_ts,
+            end_ts,
+        },
+    })
+}
+
+pub fn list_manual_entries(conn: &Connection, date: &str) -> Result<Vec<ManualEntry>, String> {
+    let (start, end) = local_day_bounds(date)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, start_ts, end_ts, app_bundle_id, app_name FROM segments
+         WHERE is_manual = 1 AND start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts, id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![start, end], |r| {
+            let seg = Segment {
+                start_ts: r.get(1)?,
+                end_ts: r.get(2)?,
+                bundle_id: r.get(3)?,
+                name: r.get(4)?,
+                title: None,
+            };
+            Ok(ManualEntry {
+                id: r.get(0)?,
+                app_key: seg.key(),
+                app_name: seg.display_name(),
+                bundle_id: seg.bundle_id,
+                start_ts: seg.start_ts,
+                end_ts: seg.end_ts,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<_>>()
+        .map_err(|e| e.to_string())
+}
+
+pub fn delete_manual_entry(conn: &Connection, id: i64) -> Result<(), String> {
+    let removed = conn
+        .execute("DELETE FROM segments WHERE id = ?1 AND is_manual = 1", [id])
+        .map_err(|e| e.to_string())?;
+    if removed == 0
+        && conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM segments WHERE id = ?1)",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(|e| e.to_string())?
+    {
+        return Err("Only manual entries can be deleted individually.".into());
+    }
     Ok(())
 }
 
@@ -764,7 +957,7 @@ pub fn remove_ignored_entry(conn: &Connection, app_key: &str, title: &str) -> ru
 
 // ---- aggregation ----------------------------------------------------------
 
-/// One row of the immutable `segments` table, with the domain derivations
+/// One recorded interval, with the domain derivations
 /// (stable key, display name, duration, local date) defined once so every
 /// aggregation reads a segment the same way.
 struct Segment {
@@ -1190,6 +1383,7 @@ pub(crate) fn local_date_string(ts: i64) -> String {
 }
 
 /// Local midnight (unix seconds) for a 'YYYY-MM-DD' date string.
+#[cfg(test)]
 pub(crate) fn day_start_ts(date: &str) -> i64 {
     let nd = NaiveDate::parse_from_str(date, "%Y-%m-%d").expect("valid date");
     let naive = nd.and_hms_opt(0, 0, 0).unwrap();
@@ -1349,8 +1543,7 @@ pub fn set_autodelete_config(conn: &Connection, enabled: bool, days: u32) -> rus
 }
 
 pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
-    let start = day_start_ts(date);
-    let end = start + 86_400;
+    let (start, end) = local_day_bounds(date).map_err(|_| rusqlite::Error::InvalidQuery)?;
     let res = Resolver::load_day(conn, date)?;
     let ignores = Ignores::load(conn)?;
 
@@ -1386,18 +1579,21 @@ pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
         entry.seconds += dur;
         *entry.titles.entry(title).or_insert(0) += dur;
 
-        // Spread across hour buckets of this local day (cap overflow into hour 23).
+        // Local minute boundaries keep DST changes in the displayed clock hour.
         let mut t = seg.start_ts;
         while t < seg.end_ts {
-            let idx = (((t - start) / 3600).clamp(0, 23)) as usize;
-            let hour_end = start + ((idx as i64) + 1) * 3600;
-            let chunk_end = seg.end_ts.min(hour_end);
-            let chunk = (chunk_end - t).max(0);
+            let (idx, chunk_end) = if t >= end {
+                (23, seg.end_ts) // cross-midnight sessions belong to their start date
+            } else {
+                let local = Local.timestamp_opt(t, 0).single().expect("valid ts");
+                (
+                    local.hour() as usize,
+                    seg.end_ts.min(end).min(t + 60 - i64::from(local.second())),
+                )
+            };
+            let chunk = chunk_end - t;
             hours[idx] += chunk;
             entry.hours[idx] += chunk;
-            if chunk_end <= t {
-                break;
-            }
             t = chunk_end;
         }
     }
@@ -1439,8 +1635,7 @@ pub fn day_view(conn: &Connection, date: &str) -> rusqlite::Result<DayView> {
 /// Total tracked seconds for one local day (segments attributed by start_ts,
 /// same convention as day_view).
 pub fn day_total_seconds(conn: &Connection, date: &str) -> rusqlite::Result<i64> {
-    let start = day_start_ts(date);
-    let end = start + 86_400;
+    let (start, end) = local_day_bounds(date).map_err(|_| rusqlite::Error::InvalidQuery)?;
     let ignores = Ignores::load(conn)?;
     let mut total = 0;
     for seg in read_segments(conn, Some((start, end)))? {
@@ -1660,10 +1855,10 @@ pub fn project_day_entries(
         return Ok(vec![]);
     }
     let ignores = Ignores::load(conn)?;
-    let start = day_start_ts(date);
+    let (start, end) = local_day_bounds(date).map_err(|_| rusqlite::Error::InvalidQuery)?;
 
     let mut by_row: HashMap<(String, String), ReceiptEntry> = HashMap::new();
-    for seg in read_segments(conn, Some((start, start + 86_400)))? {
+    for seg in read_segments(conn, Some((start, end)))? {
         let key = seg.key();
         let title = seg.title();
         if ignores.matches(&key, &title) {
@@ -1831,6 +2026,340 @@ mod tests {
     /// *which* projects rather than why.
     fn ids(links: &[RowProject]) -> Vec<i64> {
         links.iter().map(|link| link.project_id).collect()
+    }
+
+    fn manual_input(date: &str, start: &str, end: &str) -> ManualEntryInput {
+        ManualEntryInput {
+            app_key: "com.a".into(),
+            date: date.into(),
+            start_time: start.into(),
+            end_time: end.into(),
+        }
+    }
+
+    #[test]
+    fn manual_entries_warn_before_writing_and_delete_only_manual_data() {
+        let conn = mem();
+        let date = "2026-01-15";
+        let s = day_start_ts(date);
+        seg(&conn, s - 60, s, Some("com.a"), Some("A"), None);
+        let now = s + 12 * 3600;
+        let AddManualEntryResult::Saved { entry } = add_manual_entry(
+            &conn,
+            &manual_input(date, "09:00", "10:30"),
+            false,
+            now,
+            None,
+        )
+        .unwrap() else {
+            panic!("expected saved entry")
+        };
+        assert_eq!(entry.end_ts - entry.start_ts, 5400);
+        assert_eq!(day_view(&conn, date).unwrap().total_seconds, 5400);
+        assert_eq!(list_manual_entries(&conn, date).unwrap().len(), 1);
+
+        let overlap = manual_input(date, "10:00", "11:00");
+        let AddManualEntryResult::Overlap { conflicts } =
+            add_manual_entry(&conn, &overlap, false, now, None).unwrap()
+        else {
+            panic!("expected overlap warning")
+        };
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(list_manual_entries(&conn, date).unwrap().len(), 1);
+        add_manual_entry(&conn, &overlap, true, now, None).unwrap();
+        assert_eq!(day_total_seconds(&conn, date).unwrap(), 9000);
+
+        assert!(delete_manual_entry(&conn, 1).is_err());
+        delete_manual_entry(&conn, entry.id).unwrap();
+        delete_manual_entry(&conn, entry.id).unwrap();
+        assert_eq!(day_total_seconds(&conn, date).unwrap(), 3600);
+        assert_eq!(count(&conn, "segments"), 2);
+    }
+
+    #[test]
+    fn manual_entries_validate_input_even_when_overlap_is_acknowledged() {
+        let conn = mem();
+        let s = day_start_ts("2026-01-15");
+        seg(&conn, s - 60, s, Some("com.a"), Some("A"), None);
+        for (date, start, end) in [
+            ("2026-01-15", "09:00", "09:00"),
+            ("2026-01-15", "10:00", "09:00"),
+            ("2026-01-15", "23:00", "01:00"),
+            ("2026-01-15", "09:00", "13:00"),
+            ("2026-01-16", "09:00", "10:00"),
+            ("2026-02-30", "09:00", "10:00"),
+            ("2026-1-15", "09:00", "10:00"),
+            ("", "09:00", "10:00"),
+            ("2026-01-15", "", "10:00"),
+            ("2026-01-15", "9:00", "10:00"),
+            ("2026-01-15", "09:00", "25:00"),
+        ] {
+            assert!(
+                add_manual_entry(
+                    &conn,
+                    &manual_input(date, start, end),
+                    true,
+                    s + 12 * 3600,
+                    None
+                )
+                .is_err(),
+                "{date} {start} {end}"
+            );
+        }
+        let mut input = manual_input("2026-01-15", "09:00", "10:00");
+        input.app_key = "not-tracked".into();
+        assert!(add_manual_entry(&conn, &input, true, s + 12 * 3600, None).is_err());
+        add_ignored_entry(&conn, "com.a", Some("A"), "").unwrap();
+        assert!(add_manual_entry(
+            &conn,
+            &manual_input("2026-01-15", "09:00", "10:00"),
+            false,
+            s + 12 * 3600,
+            None
+        )
+        .is_err());
+        assert!(list_manual_entries(&conn, "bad date").is_err());
+        assert_eq!(count(&conn, "segments"), 1);
+    }
+
+    #[test]
+    fn manual_entries_check_ignored_cross_day_activity_and_adjacent_boundaries() {
+        let conn = mem();
+        let date = "2026-01-15";
+        let s = day_start_ts(date);
+        seg(&conn, s - 60, s, Some("com.a"), Some("A"), None);
+        seg(&conn, s - 100, s + 9 * 3600, Some("com.b"), Some("B"), None);
+        add_ignored_entry(&conn, "com.b", Some("B"), "").unwrap();
+        let input = manual_input(date, "08:00", "09:00");
+        assert!(matches!(
+            add_manual_entry(&conn, &input, false, s + 12 * 3600, None).unwrap(),
+            AddManualEntryResult::Overlap { .. }
+        ));
+        let adjacent = manual_input(date, "09:00", "10:00");
+        assert!(matches!(
+            add_manual_entry(&conn, &adjacent, false, s + 12 * 3600, None).unwrap(),
+            AddManualEntryResult::Saved { .. }
+        ));
+    }
+
+    #[test]
+    fn manual_entries_follow_project_resolution_ignores_and_cleanup() {
+        let conn = mem();
+        let date = "2026-01-15";
+        let s = day_start_ts(date);
+        seg(&conn, s - 60, s, Some("com.a"), Some("A"), None);
+        let project = create_project(&conn, "Work", "#fff").unwrap();
+        add_assignment(&conn, date, "com.a", "", project.id).unwrap();
+        add_manual_entry(
+            &conn,
+            &manual_input(date, "09:00", "10:00"),
+            false,
+            s + 12 * 3600,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            project_breakdown(&conn, project.id).unwrap()[0].seconds,
+            3600
+        );
+        assert_eq!(
+            project_day_entries(&conn, project.id, date).unwrap()[0].seconds,
+            3600
+        );
+        assert_eq!(project_apps(&conn, project.id).unwrap()[0].seconds, 3600);
+        assert_eq!(clear_untagged(&conn).unwrap(), 1);
+        assert_eq!(list_manual_entries(&conn, date).unwrap().len(), 1);
+        add_ignored_entry(&conn, "com.a", Some("A"), "").unwrap();
+        assert_eq!(day_total_seconds(&conn, date).unwrap(), 0);
+        assert_eq!(list_manual_entries(&conn, date).unwrap().len(), 1);
+        clear_tracking_data(&conn).unwrap();
+        assert!(list_manual_entries(&conn, date).unwrap().is_empty());
+    }
+
+    #[test]
+    fn manual_entries_migrate_existing_sessions_without_changing_them() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE segments (id INTEGER PRIMARY KEY, start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL, app_bundle_id TEXT, app_name TEXT, window_title TEXT);
+            INSERT INTO segments VALUES (7, 100, 160, 'com.a', 'A', 'Document');").unwrap();
+        migrate_segments_manual(&conn).unwrap();
+        migrate_segments_manual(&conn).unwrap();
+        let old: (i64, i64, String, i64) = conn
+            .query_row(
+                "SELECT start_ts, end_ts, window_title, is_manual FROM segments WHERE id = 7",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(old, (100, 160, "Document".into(), 0));
+        insert_segment(&conn, 160, 200, None, Some("B"), None).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT SUM(is_manual) FROM segments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn manual_entries_keep_rules_and_exceptions_during_retention_and_reset() {
+        let conn = mem();
+        let date = "2000-01-15";
+        let s = day_start_ts(date);
+        seg(&conn, s - 60, s, Some("com.a"), Some("A"), None);
+        let project = create_project(&conn, "Work", "#fff").unwrap();
+        create_rule(&conn, project.id, "com.a", Some("A"), "", None).unwrap();
+        add_manual_entry(
+            &conn,
+            &manual_input(date, "09:00", "10:00"),
+            false,
+            s + 12 * 3600,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            project_day_entries(&conn, project.id, date).unwrap()[0].seconds,
+            3600
+        );
+        assert_eq!(clear_untagged(&conn).unwrap(), 0);
+        exclude_for_day(&conn, date, "com.a", "", project.id).unwrap();
+        assert!(project_day_entries(&conn, project.id, date)
+            .unwrap()
+            .is_empty());
+        assert_eq!(purge_untagged_older_than(&conn, 1).unwrap(), 1);
+        assert!(list_manual_entries(&conn, date).unwrap().is_empty());
+        add_manual_entry(
+            &conn,
+            &manual_input(date, "09:00", "10:00"),
+            false,
+            s + 12 * 3600,
+            None,
+        )
+        .unwrap();
+        reset_everything(&conn).unwrap();
+        assert!(list_manual_entries(&conn, date).unwrap().is_empty());
+    }
+
+    #[test]
+    fn manual_local_day_chart_keeps_automatic_midnight_overflow() {
+        let conn = mem();
+        let date = "2026-01-15";
+        let s = day_start_ts(date);
+        seg(
+            &conn,
+            s + 23 * 3600 + 1800,
+            s + 24 * 3600 + 1800,
+            Some("com.a"),
+            Some("A"),
+            None,
+        );
+        let view = day_view(&conn, date).unwrap();
+        assert_eq!(view.total_seconds, 3600);
+        assert_eq!(view.hours[23], 3600);
+        assert_eq!(view.hours.iter().sum::<i64>(), view.total_seconds);
+    }
+
+    #[test]
+    fn manual_entries_survive_reopening_the_database() {
+        let path = std::env::temp_dir().join(format!(
+            "echo-manual-{}-{}.sqlite",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let date = "2026-01-15";
+        let s = day_start_ts(date);
+        {
+            let conn = open(&path).unwrap();
+            seg(&conn, s - 60, s, Some("com.a"), Some("A"), None);
+            add_manual_entry(
+                &conn,
+                &manual_input(date, "09:00", "10:00"),
+                false,
+                s + 12 * 3600,
+                None,
+            )
+            .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        let entries = list_manual_entries(&conn, date).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].app_name, "A");
+        assert_eq!(entries[0].end_ts - entries[0].start_ts, 3600);
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn manual_entries_respect_daylight_saving_days() {
+        // A separate process pins Local without changing other tests' timezone.
+        if std::env::var("ECHO_MANUAL_TZ_TEST").as_deref() != Ok("1") {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "db::tests::manual_entries_respect_daylight_saving_days",
+                    "--nocapture",
+                ])
+                .env("TZ", "Pacific/Auckland")
+                .env("ECHO_MANUAL_TZ_TEST", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        assert_eq!(std::env::var("TZ").unwrap(), "Pacific/Auckland");
+        for (date, next, day_hours, interval_hours, two_am_seconds) in [
+            ("2026-04-05", "2026-04-06", 25, 5, 7200),
+            ("2026-09-27", "2026-09-28", 23, 3, 0),
+        ] {
+            let conn = mem();
+            let s = day_start_ts(date);
+            let end = day_start_ts(next);
+            assert_eq!(end - s, day_hours * 3600);
+            seg(&conn, s - 60, s, Some("com.a"), Some("A"), None);
+            seg(&conn, end, end + 1800, Some("com.a"), Some("A"), None);
+            add_manual_entry(
+                &conn,
+                &manual_input(date, "00:00", "04:00"),
+                false,
+                end + 3600,
+                None,
+            )
+            .unwrap();
+            add_manual_entry(
+                &conn,
+                &manual_input(date, "23:00", "23:30"),
+                false,
+                end + 3600,
+                None,
+            )
+            .unwrap();
+            assert!(add_manual_entry(
+                &conn,
+                &manual_input(date, "02:30", "03:30"),
+                true,
+                end + 3600,
+                None
+            )
+            .is_err());
+            let total = interval_hours * 3600 + 1800;
+            let view = day_view(&conn, date).unwrap();
+            assert_eq!(view.total_seconds, total, "{date}");
+            assert_eq!(view.hours[23], 1800, "{date}");
+            assert_eq!(view.hours[2], two_am_seconds, "{date}");
+            assert_eq!(view.hours.iter().sum::<i64>(), total);
+            assert_eq!(day_total_seconds(&conn, date).unwrap(), total);
+            assert_eq!(list_manual_entries(&conn, date).unwrap().len(), 2);
+            let project = create_project(&conn, "Work", "#fff").unwrap();
+            add_assignment(&conn, date, "com.a", "", project.id).unwrap();
+            assert_eq!(
+                project_day_entries(&conn, project.id, date).unwrap()[0].seconds,
+                total
+            );
+        }
     }
 
     #[test]

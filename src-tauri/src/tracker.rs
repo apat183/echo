@@ -42,6 +42,28 @@ pub fn close_open_segment(slot: &mut Option<OpenSegment>, db: &DbState, end_ts: 
 }
 
 impl TrackerState {
+    pub fn add_manual_entry(
+        &self,
+        db: &DbState,
+        input: &db::ManualEntryInput,
+        allow_overlap: bool,
+    ) -> Result<db::AddManualEntryResult, String> {
+        let current = self.current.lock().map_err(|e| e.to_string())?;
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().timestamp();
+        let open = current.as_ref().map(|seg| db::ManualConflict {
+            start_ts: seg.start_ts,
+            end_ts: now,
+            app_name: seg
+                .app
+                .name
+                .clone()
+                .or_else(|| seg.app.bundle.clone())
+                .unwrap_or_else(|| "unknown".into()),
+        });
+        db::add_manual_entry(&conn, input, allow_overlap, now, open)
+    }
+
     /// Lock `current` and close-and-write it. Used by pause and quit.
     /// A poisoned lock is recovered — the flush must survive a prior panic.
     pub fn close_current(&self, db: &DbState, end_ts: i64) {
@@ -137,6 +159,68 @@ mod tests {
         let state = TrackerState::default();
         state.close_current(&db, 130);
         assert!(segments(&db).is_empty());
+    }
+
+    #[test]
+    fn manual_entry_warns_about_open_session_without_changing_tracking() {
+        let db = mem_db();
+        let state = TrackerState::default();
+        let s = db::day_start_ts("2000-01-15");
+        db::insert_segment(
+            &db.lock().unwrap(),
+            s - 60,
+            s,
+            Some("com.a"),
+            Some("A"),
+            None,
+        )
+        .unwrap();
+        *state.current.lock().unwrap() = Some(OpenSegment {
+            start_ts: s + 9 * 3600,
+            app: front("B"),
+        });
+        let input = db::ManualEntryInput {
+            app_key: "com.a".into(),
+            date: "2000-01-15".into(),
+            start_time: "09:30".into(),
+            end_time: "10:00".into(),
+        };
+        assert!(matches!(
+            state.add_manual_entry(&db, &input, false).unwrap(),
+            db::AddManualEntryResult::Overlap { .. }
+        ));
+        assert_eq!(segments(&db).len(), 1);
+        assert!(matches!(
+            state.add_manual_entry(&db, &input, true).unwrap(),
+            db::AddManualEntryResult::Saved { .. }
+        ));
+        let current = state.current.lock().unwrap();
+        assert_eq!(current.as_ref().unwrap().start_ts, s + 9 * 3600);
+        assert!(current.as_ref().unwrap().app == front("B"));
+        assert!(!state.paused.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn manual_entry_can_be_added_while_paused_without_resuming() {
+        let db = mem_db();
+        let state = TrackerState::default();
+        state
+            .paused
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let s = db::day_start_ts("2000-01-15");
+        db::insert_segment(&db.lock().unwrap(), s - 60, s, None, Some("A"), None).unwrap();
+        let input = db::ManualEntryInput {
+            app_key: "A".into(),
+            date: "2000-01-15".into(),
+            start_time: "09:00".into(),
+            end_time: "10:00".into(),
+        };
+        assert!(matches!(
+            state.add_manual_entry(&db, &input, false).unwrap(),
+            db::AddManualEntryResult::Saved { .. }
+        ));
+        assert!(state.paused.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(state.current.lock().unwrap().is_none());
     }
 
     #[test]

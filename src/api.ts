@@ -40,6 +40,28 @@ export type DayView = {
 
 export type DayTotal = { date: string; seconds: number };
 
+export type ManualEntryInput = {
+  appKey: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+};
+
+// Mirrors the manual-entry wire types in src-tauri/src/db.rs.
+export type ManualEntry = {
+  id: number;
+  app_key: string;
+  app_name: string;
+  bundle_id: string | null;
+  start_ts: number;
+  end_ts: number;
+};
+
+export type ManualConflict = { app_name: string; start_ts: number; end_ts: number };
+export type AddManualEntryResult =
+  | { status: "saved"; entry: ManualEntry }
+  | { status: "overlap"; conflicts: ManualConflict[] };
+
 export type IgnoredEntry = {
   app_key: string;
   app_name: string | null;
@@ -126,6 +148,10 @@ export type UpdateStatus =
 
 export const api = {
   getDayView: (date: string) => invoke<DayView>("get_day_view", { date }),
+  addManualEntry: (input: ManualEntryInput, allowOverlap = false) =>
+    invoke<AddManualEntryResult>("add_manual_entry", { input, allowOverlap }),
+  listManualEntries: (date: string) => invoke<ManualEntry[]>("list_manual_entries", { date }),
+  deleteManualEntry: (id: number) => invoke<void>("delete_manual_entry", { id }),
   listProjects: () => invoke<Project[]>("list_projects"),
   createProject: (name: string, color: string) =>
     invoke<Project>("create_project", { name, color }),

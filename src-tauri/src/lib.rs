@@ -34,6 +34,31 @@ fn get_day_view(state: State<'_, DbState>, date: String) -> Result<DayView, Stri
 }
 
 #[tauri::command(async)]
+fn add_manual_entry(
+    state: State<'_, DbState>,
+    track: State<'_, Arc<TrackerState>>,
+    input: db::ManualEntryInput,
+    allow_overlap: bool,
+) -> Result<db::AddManualEntryResult, String> {
+    track.add_manual_entry(&state, &input, allow_overlap)
+}
+
+#[tauri::command(async)]
+fn list_manual_entries(
+    state: State<'_, DbState>,
+    date: String,
+) -> Result<Vec<db::ManualEntry>, String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::list_manual_entries(&conn, &date)
+}
+
+#[tauri::command(async)]
+fn delete_manual_entry(state: State<'_, DbState>, id: i64) -> Result<(), String> {
+    let conn = state.lock().map_err(|e| e.to_string())?;
+    db::delete_manual_entry(&conn, id)
+}
+
+#[tauri::command(async)]
 fn list_projects(state: State<'_, DbState>) -> Result<Vec<Project>, String> {
     perf::note_first_ipc("list_projects");
     let conn = state.lock().map_err(|e| e.to_string())?;
@@ -517,6 +542,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_day_view,
+            add_manual_entry,
+            list_manual_entries,
+            delete_manual_entry,
             list_projects,
             create_project,
             delete_project,
